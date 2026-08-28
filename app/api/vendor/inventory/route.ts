@@ -1,11 +1,17 @@
 import { NextResponse } from "next/server";
 import { getAuthenticatedVendorContext } from "@/lib/supabase/vendor_auth";
 import { getSupabaseAdminClient } from "@/lib/supabase/admin";
+import {
+  getStoredItemStock,
+  saveStoredItemStock,
+  appendInventoryLog,
+} from "@/lib/vendor/inventoryStore";
 
 interface AdjustStockPayload {
   menuItemId: string;
   quantityDelta?: number;
   exactQuantity?: number;
+  lowStockThreshold?: number;
   adjustmentType?: string;
   reason?: string;
 }
@@ -21,20 +27,34 @@ export async function GET() {
     }
 
     const supabase = getSupabaseAdminClient();
-    const { data: items, error } = await supabase
+    const { data: dbItems, error } = await supabase
       .from("menu_items")
       .select("*")
       .eq("canteen_id", vendorCtx.canteenId)
       .order("name", { ascending: true });
 
     if (error) {
+      console.error("Vendor inventory GET error:", error);
       return NextResponse.json(
         { ok: false, error: "Failed to fetch inventory items." },
         { status: 500 },
       );
     }
 
-    return NextResponse.json({ ok: true, items });
+    const enrichedItems = (dbItems || []).map((item) => {
+      const stockInfo = getStoredItemStock(
+        item.id,
+        vendorCtx.canteenId,
+        item.availability,
+      );
+      return {
+        ...item,
+        stock_quantity: stockInfo.stockQuantity,
+        low_stock_threshold: stockInfo.lowStockThreshold,
+      };
+    });
+
+    return NextResponse.json({ ok: true, items: enrichedItems });
   } catch (err) {
     console.error("Vendor inventory GET error:", err);
     return NextResponse.json(
@@ -65,14 +85,14 @@ export async function POST(request: Request) {
 
     const supabase = getSupabaseAdminClient();
 
-    // Cross-tenant IDOR Security Check
-    const { data: dbItem } = await supabase
+    // Verify dish belongs to authorized vendor's canteen
+    const { data: dbItem, error: findErr } = await supabase
       .from("menu_items")
-      .select("id, canteen_id, stock_quantity, availability, name")
+      .select("id, canteen_id, name, availability")
       .eq("id", payload.menuItemId)
       .limit(1);
 
-    if (!dbItem || dbItem.length === 0) {
+    if (findErr || !dbItem || dbItem.length === 0) {
       return NextResponse.json(
         { ok: false, error: "Menu item not found." },
         { status: 404 },
@@ -87,7 +107,12 @@ export async function POST(request: Request) {
       );
     }
 
-    const currentStock = Number(targetItem.stock_quantity ?? 50);
+    const currentStockInfo = getStoredItemStock(
+      targetItem.id,
+      vendorCtx.canteenId,
+      targetItem.availability,
+    );
+    const currentStock = currentStockInfo.stockQuantity;
     let newStock = currentStock;
 
     if (payload.exactQuantity !== undefined) {
@@ -99,38 +124,46 @@ export async function POST(request: Request) {
     const qtyChanged = newStock - currentStock;
     const newAvailability = newStock <= 0 ? "unavailable" : "available";
 
-    // Atomic DB Update
-    const { error: updateErr } = await supabase
-      .from("menu_items")
-      .update({
-        stock_quantity: newStock,
-        availability: newAvailability,
-      })
-      .eq("id", targetItem.id);
-
-    if (updateErr) {
-      console.error("Inventory update database error:", updateErr);
-      return NextResponse.json(
-        { ok: false, error: "Failed to update stock quantity." },
-        { status: 500 },
-      );
+    // Update availability on Supabase menu_items table
+    if (targetItem.availability !== newAvailability) {
+      await supabase
+        .from("menu_items")
+        .update({ availability: newAvailability })
+        .eq("id", targetItem.id);
     }
 
-    // Record audit log entry in inventory_logs
-    try {
-      await supabase.from("inventory_logs").insert({
-        menu_item_id: targetItem.id,
-        canteen_id: vendorCtx.canteenId,
-        previous_quantity: currentStock,
-        new_quantity: newStock,
-        quantity_changed: qtyChanged,
-        adjustment_type: payload.adjustmentType || "manual_correction",
-        reason: payload.reason?.trim() || null,
-        created_by: vendorCtx.userId,
-      });
-    } catch (logErr) {
-      console.warn("Non-critical inventory log insert warning:", logErr);
-    }
+    // Persist new stock & low stock threshold
+    saveStoredItemStock(
+      targetItem.id,
+      vendorCtx.canteenId,
+      newStock,
+      payload.lowStockThreshold,
+    );
+
+    // Record audit log
+    appendInventoryLog({
+      menuItemId: targetItem.id,
+      canteenId: vendorCtx.canteenId,
+      menuItemName: targetItem.name,
+      previousQuantity: currentStock,
+      newQuantity: newStock,
+      quantityChanged: qtyChanged,
+      adjustmentType:
+        payload.adjustmentType ||
+        (qtyChanged > 0
+          ? "stock_added"
+          : qtyChanged < 0
+            ? "stock_removed"
+            : "manual_correction"),
+      reason:
+        payload.reason?.trim() ||
+        (qtyChanged > 0
+          ? "Restock added"
+          : qtyChanged < 0
+            ? "Stock reduced"
+            : "Manual quantity override"),
+      createdBy: vendorCtx.userId,
+    });
 
     return NextResponse.json({
       ok: true,

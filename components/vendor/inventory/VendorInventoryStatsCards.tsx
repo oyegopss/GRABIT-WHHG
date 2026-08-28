@@ -4,43 +4,47 @@ import type { VendorInventoryItem } from "@/lib/supabase/vendor_inventory";
 
 export interface VendorInventoryStatsCardsProps {
   items: VendorInventoryItem[];
+  isLoading?: boolean;
 }
 
-export function VendorInventoryStatsCards({ items }: VendorInventoryStatsCardsProps) {
+export function VendorInventoryStatsCards({
+  items,
+  isLoading = false,
+}: VendorInventoryStatsCardsProps) {
   const totalItems = items.length;
-  const inStock = items.filter((i) => i.stockStatus === "IN_STOCK").length;
-  const lowStock = items.filter((i) => i.stockStatus === "LOW_STOCK").length;
-  const outOfStock = items.filter((i) => i.stockStatus === "OUT_OF_STOCK").length;
-  const totalUnits = items.reduce((acc, i) => acc + i.stockQuantity, 0);
+  const inStock = items.filter((i) => i.inStock && i.stockStatus === "IN_STOCK").length;
+  const lowStock = items.filter((i) => i.inStock && i.stockStatus === "LOW_STOCK").length;
+  const outOfStock = items.filter((i) => !i.inStock || i.stockStatus === "OUT_OF_STOCK").length;
+  const totalUnits = items.reduce((acc, i) => acc + (i.inStock ? i.stockQuantity : 0), 0);
 
   const stats = [
     {
       title: "Total Items",
-      value: totalItems.toLocaleString(),
+      value: isLoading ? "—" : totalItems.toLocaleString(),
       icon: "inventory_2",
       color: "text-primary bg-primary/10",
     },
     {
       title: "In Stock",
-      value: inStock.toLocaleString(),
+      value: isLoading ? "—" : inStock.toLocaleString(),
       icon: "check_circle",
       color: "text-emerald-400 bg-emerald-500/10",
     },
     {
       title: "Low Stock",
-      value: lowStock.toLocaleString(),
+      value: isLoading ? "—" : lowStock.toLocaleString(),
       icon: "warning",
       color: "text-amber-400 bg-amber-500/10",
     },
     {
       title: "Out of Stock",
-      value: outOfStock.toLocaleString(),
+      value: isLoading ? "—" : outOfStock.toLocaleString(),
       icon: "block",
       color: "text-danger bg-danger/10",
     },
     {
       title: "Total Units",
-      value: totalUnits.toLocaleString(),
+      value: isLoading ? "—" : totalUnits.toLocaleString(),
       icon: "format_list_numbered",
       color: "text-blue-400 bg-blue-500/10",
     },

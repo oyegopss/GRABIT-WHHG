@@ -9,9 +9,9 @@ import { VENDOR_NAV } from "@/app/vendor/layout";
 import { VendorNotificationsDrawer } from "@/components/vendor/notifications/VendorNotificationsDrawer";
 import {
   getLiveVendorAnalytics,
-  exportVendorAnalyticsCsv,
   type VendorAnalyticsData,
 } from "@/lib/supabase/vendor_analytics";
+import { exportVendorAnalyticsPdf } from "@/lib/vendor/exportVendorAnalyticsPdf";
 import { useVendor } from "@/lib/vendor/VendorContext";
 import { createClient } from "@/lib/supabase/client";
 import { useOrderAlertSound } from "@/lib/vendor/useOrderAlertSound";
@@ -35,6 +35,7 @@ export default function VendorAnalyticsPage() {
   const [data, setData] = useState<VendorAnalyticsData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isError, setIsError] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
   const [notification, setNotification] = useState<string | null>(null);
 
   // Modals & Drawers
@@ -94,11 +95,30 @@ export default function VendorAnalyticsPage() {
     loadAnalytics(newTf);
   }, [loadAnalytics]);
 
-  const handleExportCsv = useCallback(() => {
-    if (!data) return;
-    exportVendorAnalyticsCsv(data);
-    showNotification("Analytics CSV report generated and downloaded.");
-  }, [data, showNotification]);
+  const handleExportPdf = useCallback(async () => {
+    if (!data || isExporting) return;
+    setIsExporting(true);
+    showNotification("Generating PDF...");
+
+    try {
+      const res = await exportVendorAnalyticsPdf({
+        data,
+        storeName: store?.name || "GRABIT Store",
+        timeframe,
+      });
+
+      if (res.success) {
+        showNotification("Analytics PDF report downloaded.");
+      } else {
+        showNotification("Unable to generate PDF. Please try again.");
+      }
+    } catch (err) {
+      console.error("Export PDF error:", err);
+      showNotification("Unable to generate PDF. Please try again.");
+    } finally {
+      setIsExporting(false);
+    }
+  }, [data, isExporting, showNotification, store?.name, timeframe]);
 
   return (
     <div className="min-h-dvh bg-background text-foreground flex flex-col">
@@ -178,15 +198,21 @@ export default function VendorAnalyticsPage() {
               ))}
             </div>
 
-            {/* Export CSV Button */}
+            {/* Export PDF Button */}
             <button
               type="button"
-              onClick={handleExportCsv}
-              disabled={!data}
-              className="flex items-center gap-1.5 rounded-xl border border-border bg-surface-elevated px-4 py-2.5 font-display text-body-sm font-bold text-muted hover:border-primary/40 hover:text-foreground active:scale-95 transition-all disabled:opacity-50"
+              onClick={handleExportPdf}
+              disabled={!data || isExporting}
+              className="flex items-center gap-1.5 rounded-xl border border-border bg-surface-elevated px-4 py-2.5 font-display text-body-sm font-bold text-muted hover:border-primary/40 hover:text-foreground active:scale-95 transition-all disabled:opacity-50 cursor-pointer"
             >
-              <span className="material-symbols-outlined text-[18px]">download</span>
-              Export Report
+              <span
+                className={`material-symbols-outlined text-[18px] ${
+                  isExporting ? "animate-spin text-primary" : ""
+                }`}
+              >
+                {isExporting ? "progress_activity" : "download"}
+              </span>
+              {isExporting ? "Generating PDF..." : "Export Report"}
             </button>
           </div>
         </div>

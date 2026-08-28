@@ -1,13 +1,18 @@
 import type { CapacitorConfig } from '@capacitor/cli';
 
+const rawUrl = process.env.GRABIT_WEB_URL || "https://grabit.ventures";
+const entryUrl = rawUrl.replace(/\/$/, "").includes("/vendor")
+  ? rawUrl.replace(/\/$/, "")
+  : `${rawUrl.replace(/\/$/, "")}/vendor/auth?next=%2Fvendor`;
+
 const config: CapacitorConfig = {
   appId: 'com.grabit.vendor',
   appName: 'GRABIT Vendor',
   webDir: 'www',
   appendUserAgent: 'CapacitorApp/GrabItVendor',
   server: {
-    url: 'https://grabit.ventures/vendor/auth?next=%2Fvendor',
-    cleartext: false,
+    url: entryUrl,
+    cleartext: entryUrl.startsWith("http://"),
   },
   android: {
     backgroundColor: '#0a0a0a',

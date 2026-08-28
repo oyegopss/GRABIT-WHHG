@@ -22,7 +22,6 @@ import { useVendor } from "@/lib/vendor/VendorContext";
 import { getLiveVendorCategories, type VendorCategory } from "@/lib/supabase/vendor_categories";
 import { VendorCategoryManagerModal } from "@/components/vendor/menu/VendorCategoryManagerModal";
 import { createClient } from "@/lib/supabase/client";
-
 export default function VendorMenuManagementPage() {
   return (
     <Suspense fallback={null}>
@@ -33,6 +32,7 @@ export default function VendorMenuManagementPage() {
 
 function VendorMenuManagementPageInner() {
   const { canteenId } = useVendor();
+
   const [menuItems, setMenuItems] = useState<VendorMenuItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
@@ -251,9 +251,9 @@ function VendorMenuManagementPageInner() {
 
   return (
     <div className="min-h-dvh bg-background text-foreground flex flex-col">
-      <main className="flex-1 p-4 sm:p-6 max-w-5xl mx-auto w-full pb-24">
+      <main className="flex-1 px-4 sm:px-6 md:px-8 pt-7 sm:pt-9 md:pt-10 pb-24 sm:pb-12 max-w-5xl mx-auto w-full flex flex-col gap-6">
         {notification && (
-          <div className="mb-4 rounded-xl border border-primary/30 bg-primary/10 p-3 text-center text-body-sm font-semibold text-primary animate-fade-in">
+          <div className="rounded-xl border border-primary/30 bg-primary/10 p-3 text-center text-body-sm font-semibold text-primary animate-fade-in">
             {notification}
           </div>
         )}

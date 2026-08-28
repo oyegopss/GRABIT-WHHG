@@ -1,16 +1,18 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { VendorInventoryItem } from "@/lib/supabase/vendor_inventory";
 
 export interface VendorStockAdjustModalProps {
   item: VendorInventoryItem | null;
+  items?: VendorInventoryItem[];
   isOpen: boolean;
   onClose: () => void;
   onConfirm: (payload: {
     menuItemId: string;
     quantityDelta?: number;
     exactQuantity?: number;
+    lowStockThreshold?: number;
     adjustmentType?: string;
     reason?: string;
   }) => Promise<void>;
@@ -18,16 +20,31 @@ export interface VendorStockAdjustModalProps {
 
 export function VendorStockAdjustModal({
   item,
+  items = [],
   isOpen,
   onClose,
   onConfirm,
 }: VendorStockAdjustModalProps) {
+  const [selectedItemId, setSelectedItemId] = useState<string>("");
   const [mode, setMode] = useState<"add" | "remove" | "set">("add");
   const [quantity, setQuantity] = useState("10");
   const [reason, setReason] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  if (!isOpen || !item) return null;
+  useEffect(() => {
+    if (item) {
+      setSelectedItemId(item.id);
+    } else if (items.length > 0) {
+      setSelectedItemId(items[0].id);
+    }
+  }, [item, items]);
+
+  if (!isOpen) return null;
+
+  const currentItem =
+    items.find((i) => i.id === selectedItemId) || item;
+
+  if (!currentItem) return null;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -46,21 +63,21 @@ export function VendorStockAdjustModal({
 
     if (mode === "set") {
       payload = {
-        menuItemId: item.id,
+        menuItemId: currentItem.id,
         exactQuantity: qtyNum,
         adjustmentType: "manual_correction",
         reason: reason.trim() || "Manual quantity override",
       };
     } else if (mode === "add") {
       payload = {
-        menuItemId: item.id,
+        menuItemId: currentItem.id,
         quantityDelta: qtyNum,
         adjustmentType: "stock_added",
         reason: reason.trim() || "Restock added",
       };
     } else {
       payload = {
-        menuItemId: item.id,
+        menuItemId: currentItem.id,
         quantityDelta: -qtyNum,
         adjustmentType: "stock_removed",
         reason: reason.trim() || "Stock removed",
@@ -78,10 +95,10 @@ export function VendorStockAdjustModal({
         <div className="mb-4 flex items-center justify-between border-b border-border pb-3">
           <div>
             <h3 className="font-display text-title font-bold text-foreground">
-              Adjust Stock: {item.name}
+              Adjust Stock: {currentItem.name}
             </h3>
             <p className="text-caption text-muted">
-              Current Stock: <span className="font-bold text-primary">{item.stockQuantity} units</span>
+              Current Stock: <span className="font-bold text-primary">{currentItem.stockQuantity} units</span>
             </p>
           </div>
           <button
@@ -95,6 +112,26 @@ export function VendorStockAdjustModal({
         </div>
 
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+          {/* Dish Selector if multiple items available */}
+          {items.length > 1 && (
+            <div>
+              <label className="mb-1 block font-display text-caption font-bold text-muted">
+                Select Dish
+              </label>
+              <select
+                value={selectedItemId}
+                onChange={(e) => setSelectedItemId(e.target.value)}
+                className="w-full rounded-xl border border-border bg-background p-2.5 text-body-sm text-foreground focus:border-primary focus:outline-none"
+              >
+                {items.map((i) => (
+                  <option key={i.id} value={i.id}>
+                    {i.name} ({i.stockQuantity} in stock) - {i.category}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           {/* Action Mode Pills */}
           <div className="grid grid-cols-3 gap-1 rounded-xl bg-background p-1 border border-border">
             <button

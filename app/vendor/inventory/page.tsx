@@ -30,6 +30,7 @@ export default function VendorInventoryPage() {
   const [logs, setLogs] = useState<InventoryLogItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingLogs, setIsLoadingLogs] = useState(false);
+  const [isError, setIsError] = useState(false);
   const [notification, setNotification] = useState<string | null>(null);
 
   // Search & Filters
@@ -54,9 +55,15 @@ export default function VendorInventoryPage() {
 
   const loadInventory = useCallback(async () => {
     if (!canteenId) return;
-    const invItems = await getLiveVendorInventory(canteenId);
-    setItems(invItems);
-    setIsLoading(false);
+    try {
+      const invItems = await getLiveVendorInventory(canteenId);
+      setItems(invItems);
+      setIsError(false);
+    } catch {
+      setIsError(true);
+    } finally {
+      setIsLoading(false);
+    }
   }, [canteenId]);
 
   const loadHistoryLogs = useCallback(async () => {
@@ -72,12 +79,20 @@ export default function VendorInventoryPage() {
 
     if (!canteenId) return;
 
-    getLiveVendorInventory(canteenId).then((invItems) => {
-      if (isMounted) {
-        setItems(invItems);
-        setIsLoading(false);
-      }
-    });
+    getLiveVendorInventory(canteenId)
+      .then((invItems) => {
+        if (isMounted) {
+          setItems(invItems);
+          setIsLoading(false);
+          setIsError(false);
+        }
+      })
+      .catch(() => {
+        if (isMounted) {
+          setIsError(true);
+          setIsLoading(false);
+        }
+      });
 
     const supabase = createClient();
     channel = supabase
@@ -101,7 +116,7 @@ export default function VendorInventoryPage() {
   const categories = useMemo(() => {
     const set = new Set<string>();
     items.forEach((i) => {
-      if (i.category) set.add(i.category);
+      if (i.category && i.category.trim()) set.add(i.category.trim());
     });
     return Array.from(set);
   }, [items]);
@@ -134,12 +149,12 @@ export default function VendorInventoryPage() {
     const res = await adjustLiveVendorStock({
       menuItemId: itemId,
       quantityDelta: delta,
-      adjustmentType: "stock_added",
-      reason: `Quick restock +${delta}`,
+      adjustmentType: delta > 0 ? "stock_added" : "stock_removed",
+      reason: `Quick restock ${delta > 0 ? `+${delta}` : delta}`,
     });
 
     if (res.ok) {
-      showNotification(`"${target.name}" stock updated (+${delta})`);
+      showNotification(`"${target.name}" stock updated (${delta > 0 ? `+${delta}` : delta})`);
       loadInventory();
     } else {
       showNotification(res.error ?? "Failed to adjust stock.");
@@ -164,6 +179,7 @@ export default function VendorInventoryPage() {
     menuItemId: string;
     quantityDelta?: number;
     exactQuantity?: number;
+    lowStockThreshold?: number;
     adjustmentType?: string;
     reason?: string;
   }) => {
@@ -256,7 +272,8 @@ export default function VendorInventoryPage() {
                   setIsAdjustModalOpen(true);
                 }
               }}
-              className="flex items-center justify-center gap-1.5 rounded-xl bg-primary px-5 py-3 font-display text-body-sm font-extrabold text-on-primary shadow-glow-primary hover:opacity-90 active:scale-95 transition-all"
+              disabled={items.length === 0}
+              className="flex items-center justify-center gap-1.5 rounded-xl bg-primary px-5 py-3 font-display text-body-sm font-extrabold text-on-primary shadow-glow-primary hover:opacity-90 active:scale-95 disabled:opacity-50 transition-all"
             >
               <span className="material-symbols-outlined text-[18px]">tune</span>
               Adjust Stock
@@ -265,7 +282,7 @@ export default function VendorInventoryPage() {
         </div>
 
         {/* Inventory Statistics Dashboard */}
-        <VendorInventoryStatsCards items={items} />
+        <VendorInventoryStatsCards items={items} isLoading={isLoading} />
 
         {/* Filter Toolbar */}
         <div className="flex flex-col gap-3 rounded-2xl border border-border bg-surface-elevated p-4 sm:p-5">
@@ -332,13 +349,32 @@ export default function VendorInventoryPage() {
           )}
         </div>
 
-        {/* Inventory List / Table */}
+        {/* Inventory List / Table / Error / Loading States */}
         {isLoading ? (
           <div className="flex flex-col items-center justify-center gap-3 py-16 text-center">
             <span className="material-symbols-outlined text-[32px] text-primary animate-spin">
               progress_activity
             </span>
-            <p className="text-body-sm text-muted">Loading live inventory from Supabase...</p>
+            <p className="text-body-sm text-muted">Loading live inventory from database...</p>
+          </div>
+        ) : isError ? (
+          <div className="rounded-2xl border border-danger/30 bg-danger/5 p-8 text-center backdrop-blur-md flex flex-col items-center gap-3">
+            <span className="material-symbols-outlined text-[40px] text-danger">
+              error
+            </span>
+            <h3 className="font-display text-body-sm font-bold text-foreground">
+              Failed to load inventory
+            </h3>
+            <p className="text-caption text-muted max-w-sm">
+              An error occurred while fetching inventory from the server.
+            </p>
+            <button
+              type="button"
+              onClick={loadInventory}
+              className="mt-2 rounded-xl bg-primary px-5 py-2.5 font-display text-caption font-extrabold uppercase tracking-wider text-on-primary shadow-glow-primary"
+            >
+              Retry
+            </button>
           </div>
         ) : filteredItems.length === 0 ? (
           <div className="rounded-2xl border border-border bg-surface-elevated/70 p-8 text-center backdrop-blur-md flex flex-col items-center gap-3">
@@ -385,6 +421,7 @@ export default function VendorInventoryPage() {
 
       <VendorStockAdjustModal
         item={selectedItemForAdjust}
+        items={items}
         isOpen={isAdjustModalOpen}
         onClose={() => {
           setIsAdjustModalOpen(false);

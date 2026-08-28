@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getAuthenticatedVendorContext } from "@/lib/supabase/vendor_auth";
-import { getSupabaseAdminClient } from "@/lib/supabase/admin";
+import { getInventoryLogsForCanteen } from "@/lib/vendor/inventoryStore";
 
 export async function GET() {
   try {
@@ -12,25 +12,23 @@ export async function GET() {
       );
     }
 
-    const supabase = getSupabaseAdminClient();
-    const { data: logs, error } = await supabase
-      .from("inventory_logs")
-      .select(`
-        *,
-        menu_items ( name )
-      `)
-      .eq("canteen_id", vendorCtx.canteenId)
-      .order("created_at", { ascending: false })
-      .limit(50);
+    const logs = getInventoryLogsForCanteen(vendorCtx.canteenId);
 
-    if (error) {
-      return NextResponse.json(
-        { ok: false, error: "Failed to fetch inventory history." },
-        { status: 500 },
-      );
-    }
+    const formattedLogs = logs.map((log) => ({
+      id: log.id,
+      menu_item_id: log.menuItemId,
+      previous_quantity: log.previousQuantity,
+      new_quantity: log.newQuantity,
+      quantity_changed: log.quantityChanged,
+      adjustment_type: log.adjustmentType,
+      reason: log.reason,
+      created_at: log.createdAt,
+      menu_items: {
+        name: log.menuItemName,
+      },
+    }));
 
-    return NextResponse.json({ ok: true, logs });
+    return NextResponse.json({ ok: true, logs: formattedLogs });
   } catch (err) {
     console.error("Vendor inventory history GET error:", err);
     return NextResponse.json(
