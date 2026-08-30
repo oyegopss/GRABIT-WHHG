@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useState, useMemo, useCallback } from "react";
+import { useEffect, useState, useMemo, useCallback, useRef } from "react";
 import { CampusHeader } from "@/components/student/CampusHeader";
 import { CanteenStatusBanner } from "@/components/student/CanteenStatusBanner";
 import { CategoryChips } from "@/components/student/CategoryChips";
 import { CanteenCard } from "@/components/student/CanteenCard";
 import { CampusSelectorModal } from "@/components/student/CampusSelectorModal";
+import { CampusSwitchCartModal } from "@/components/student/CampusSwitchCartModal";
 import { StudentRecommendationsSection } from "@/components/student/StudentRecommendationsSection";
 import { CartBar } from "@/components/student/CartBar";
 import { FoodSearchResultCard } from "@/components/student/search/FoodSearchResultCard";
@@ -27,10 +28,13 @@ import {
   type CampusDetectionResult,
 } from "@/lib/utils/geolocation";
 import { getUserLocation } from "@/lib/utils/user_location";
+import {
+  getActiveCampusId,
+  setActiveCampusId,
+  addRecentlyUsedCampusId,
+} from "@/lib/campus/campus_storage";
 
 import { mockCanteenCategories, type MockCanteen, type MockCanteenCategory } from "@/lib/mock/campus";
-
-const SAVED_CAMPUS_KEY = "grabit_selected_campus_id";
 
 type CampusDetails = { id: string; name: string; canteensOpen: number; estWaitMinutes: number };
 
@@ -57,15 +61,14 @@ export function StudentDashboardClient({
   const [foodItems, setFoodItems] = useState<CampusFoodItem[]>(initialFoodItems);
   const [isLoadingCanteens, setIsLoadingCanteens] = useState(false);
 
+  // Monotonic request counter to prevent race conditions on fast campus switches
+  const campusRequestIdRef = useRef(0);
+
   // Shared cart — same store the Menu screen and Checkout read from.
   const cart = useCart();
-  // Cart clears canteenName the instant the last item is removed, which
-  // would cut the CartBar's exit animation off mid-fade — so remember the
-  // last known name/total to render while it animates out.
   const [lastCartSnapshot, setLastCartSnapshot] = useState<{ canteenName: string; total: number; itemCount: number } | null>(null);
   useEffect(() => {
     if (cart.canteenName) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setLastCartSnapshot({ canteenName: cart.canteenName, total: cart.subtotal, itemCount: cart.itemCount });
     }
   }, [cart.canteenName, cart.subtotal, cart.itemCount]);
@@ -78,14 +81,20 @@ export function StudentDashboardClient({
   const [isDetectingLocation, setIsDetectingLocation] = useState(false);
   const [locationStatusMessage, setLocationStatusMessage] = useState<string | undefined>(undefined);
   const [isModalOpen, setIsModalOpen] = useState(false);
-  // Set only for a 1–5km GPS match — the student must explicitly
-  // confirm before we switch their campus.
   const [pendingConfirmCampus, setPendingConfirmCampus] = useState<
     { campus: SupabaseCampus; distanceMeters: number } | null
   >(null);
+  const [allNearbyCampuses, setAllNearbyCampuses] = useState<
+    Array<{ campus: SupabaseCampus; distanceMeters: number }> | null
+  >(null);
+
+  // Cart conflict modal state
+  const [isCartConflictModalOpen, setIsCartConflictModalOpen] = useState(false);
+  const [targetCampusToSwitch, setTargetCampusToSwitch] = useState<SupabaseCampus | null>(null);
 
   // Load campus details, canteens & food items when active campus changes
   const loadCampusData = useCallback(async (campusId: string) => {
+    const requestId = ++campusRequestIdRef.current;
     setIsLoadingCanteens(true);
     try {
       const [details, canteenList, foodList] = await Promise.all([
@@ -93,6 +102,9 @@ export function StudentDashboardClient({
         getLiveCampusCanteens(campusId),
         getLiveCampusFoodItems(campusId),
       ]);
+
+      // Discard stale responses if a newer request was dispatched
+      if (requestId !== campusRequestIdRef.current) return;
 
       if (details) {
         setActiveCampus({ id: details.id, name: details.name });
@@ -107,80 +119,101 @@ export function StudentDashboardClient({
       setCanteens(canteenList);
       setFoodItems(foodList);
     } catch {
-      setActiveCampus(null);
-      setCanteens([]);
-      setFoodItems([]);
+      if (requestId === campusRequestIdRef.current) {
+        setActiveCampus(null);
+        setCanteens([]);
+        setFoodItems([]);
+      }
     } finally {
-      setIsLoadingCanteens(false);
+      if (requestId === campusRequestIdRef.current) {
+        setIsLoadingCanteens(false);
+      }
     }
   }, []);
 
-  // GPS-based campus detection — pure device location + Haversine
-  // distance, no Google Maps/Places/Geocoding API. Only ever runs when
-  // the student explicitly taps "Auto-Detect Campus via GPS" — that
-  // tap is what's allowed to trigger the OS permission prompt.
-  const triggerAutoDetection = useCallback(async (campusList: SupabaseCampus[]) => {
-    setIsDetectingLocation(true);
-    setLocationStatusMessage(undefined);
-    setPendingConfirmCampus(null);
+  // Perform actual campus switch and persist MRU state
+  const performCampusSwitch = useCallback(
+    (campus: SupabaseCampus) => {
+      setActiveCampusId(campus.id);
+      addRecentlyUsedCampusId(campus.id);
+      setLocationStatusMessage(undefined);
+      setPendingConfirmCampus(null);
+      setAllNearbyCampuses(null);
+      loadCampusData(campus.id);
+    },
+    [loadCampusData],
+  );
 
-    // Check browser permission state if navigator.permissions API is available
-    if (typeof window !== "undefined" && navigator.permissions?.query) {
-      try {
-        const permStatus = await navigator.permissions.query({ name: "geolocation" as PermissionName });
-        if (permStatus.state === "denied") {
-          setIsDetectingLocation(false);
+  // GPS-based campus detection — pure device location + Haversine distance.
+  // When single campus is detected with high confidence (inside campus geofence), automatically selects and closes modal.
+  // When multiple campuses are nearby, presents selectable choice.
+  // When medium confidence (1-5km), asks user to confirm.
+  // When low confidence (>5km), presents friendly message and manual selection.
+  const triggerAutoDetection = useCallback(
+    async (campusList: SupabaseCampus[]) => {
+      if (isDetectingLocation) return;
+      setIsDetectingLocation(true);
+      setLocationStatusMessage(undefined);
+      setPendingConfirmCampus(null);
+      setAllNearbyCampuses(null);
+
+      const { result, errorStatus } = await getUserLocation(8000);
+      setIsDetectingLocation(false);
+
+      if (!result) {
+        if (errorStatus === "DENIED" || errorStatus === "PERMANENTLY_DENIED") {
           setLocationStatusMessage(
-            "Location permission is disabled in your browser. Please enable location access or search your campus manually below.",
+            "Location permission is required to automatically detect your campus. Please choose your campus manually below.",
           );
-          return;
+        } else if (errorStatus === "TIMEOUT") {
+          setLocationStatusMessage(
+            "Location request timed out. Please tap Auto-Detect to retry or choose your campus manually below.",
+          );
+        } else if (errorStatus === "UNSUPPORTED") {
+          setLocationStatusMessage(
+            "GPS location is not supported on this device. Please select your campus manually below.",
+          );
+        } else {
+          setLocationStatusMessage(
+            "Location services are turned off or unavailable on your device. Please choose your campus manually below.",
+          );
+        }
+        return;
+      }
+
+      const campusItems: CampusLocationItem[] = campusList.map((c) => ({
+        id: c.id,
+        name: c.name,
+        city: c.city,
+        latitude: c.latitude,
+        longitude: c.longitude,
+        radiusMeters: c.radius_meters,
+      }));
+
+      let detection: CampusDetectionResult;
+      try {
+        const resp = await fetch("/api/location/detect", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            latitude: result.latitude,
+            longitude: result.longitude,
+            accuracy: result.accuracy,
+            campuses: campusItems,
+          }),
+        });
+
+        if (resp.ok) {
+          detection = await resp.json();
+        } else {
+          detection = detectNearestCampus(
+            result.latitude,
+            result.longitude,
+            result.accuracy,
+            campusItems,
+          );
         }
       } catch {
-        // Continue to getUserLocation if permission query is not supported
-      }
-    }
-
-    const { result, errorStatus } = await getUserLocation(8000);
-    setIsDetectingLocation(false);
-
-    if (!result) {
-      if (errorStatus === "DENIED") {
-        setLocationStatusMessage("Location access denied. Please enable location permission in your browser or search your campus manually below.");
-      } else if (errorStatus === "TIMEOUT") {
-        setLocationStatusMessage("Location request timed out. Please try again or search your campus manually below.");
-      } else if (errorStatus === "UNSUPPORTED") {
-        setLocationStatusMessage("GPS location is not supported on this device. Please select your campus manually below.");
-      } else {
-        setLocationStatusMessage("Location unavailable. Please select your campus manually below.");
-      }
-      return;
-    }
-
-    const campusItems: CampusLocationItem[] = campusList.map((c) => ({
-      id: c.id,
-      name: c.name,
-      city: c.city,
-      latitude: c.latitude,
-      longitude: c.longitude,
-      radiusMeters: c.radius_meters,
-    }));
-
-    let detection: CampusDetectionResult;
-    try {
-      const resp = await fetch("/api/location/detect", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          latitude: result.latitude,
-          longitude: result.longitude,
-          accuracy: result.accuracy,
-          campuses: campusItems,
-        }),
-      });
-
-      if (resp.ok) {
-        detection = await resp.json();
-      } else {
         detection = detectNearestCampus(
           result.latitude,
           result.longitude,
@@ -188,51 +221,65 @@ export function StudentDashboardClient({
           campusItems,
         );
       }
-    } catch {
-      detection = detectNearestCampus(
-        result.latitude,
-        result.longitude,
-        result.accuracy,
-        campusItems,
-      );
-    }
 
-    if (detection.confidence === "HIGH" && detection.detectedCampus) {
-      // <=1km — confident enough to switch automatically & close modal.
-      setLocationStatusMessage(undefined);
-      const match = campusList.find((c) => c.id === detection.detectedCampus!.id);
-      if (match) {
-        if (typeof window !== "undefined") {
-          localStorage.setItem(SAVED_CAMPUS_KEY, match.id);
-        }
-        loadCampusData(match.id);
-        setIsModalOpen(false);
-      }
-      return;
-    }
+      // Filter nearby campuses within their allowed geofence or <= 2500m
+      const nearbyList = (detection.allNearby || []).filter((item) => {
+        const radius = item.campus.radiusMeters ?? 2500;
+        return item.distanceMeters <= radius;
+      });
 
-    if (detection.confidence === "MEDIUM" && detection.detectedCampus && detection.distanceMeters != null) {
-      // 1–5km — plausible, but ask first.
-      const match = campusList.find((c) => c.id === detection.detectedCampus!.id);
-      if (match) {
-        setPendingConfirmCampus({ campus: match, distanceMeters: detection.distanceMeters });
+      const mappedNearby = nearbyList
+        .map((item) => {
+          const found = campusList.find((c) => c.id === item.campus.id);
+          return found ? { campus: found, distanceMeters: item.distanceMeters } : null;
+        })
+        .filter((item): item is { campus: SupabaseCampus; distanceMeters: number } => Boolean(item));
+
+      if (mappedNearby.length > 1) {
+        // Multiple nearby campuses detected within detection radius — show selection cards
+        setAllNearbyCampuses(mappedNearby);
         setLocationStatusMessage(undefined);
         return;
       }
-    }
 
-    // >5km, or no campus with coordinates at all.
-    setLocationStatusMessage("No GRABIT campus detected nearby. Please select your campus manually below.");
-  }, [loadCampusData]);
+      if (detection.detectedCampus && detection.distanceMeters != null) {
+        const match = campusList.find((c) => c.id === detection.detectedCampus!.id);
+        if (match) {
+          const allowedRadius = match.radius_meters ?? 2000;
+          const isHighConfidence =
+            detection.confidence === "HIGH" || detection.distanceMeters <= allowedRadius;
+
+          if (isHighConfidence) {
+            // HIGH CONFIDENCE: Inside campus geofence -> AUTO-SELECT, PERSIST, CLOSE MODAL, REFRESH HOME
+            if (activeCampus && match.id !== activeCampus.id && cart.itemCount > 0) {
+              setTargetCampusToSwitch(match);
+              setIsCartConflictModalOpen(true);
+              return;
+            }
+
+            performCampusSwitch(match);
+            setIsModalOpen(false);
+            return;
+          }
+
+          if (detection.distanceMeters <= 5000) {
+            // MEDIUM CONFIDENCE: Within 5km -> ask for confirmation
+            setPendingConfirmCampus({ campus: match, distanceMeters: detection.distanceMeters });
+            setLocationStatusMessage(undefined);
+            return;
+          }
+        }
+      }
+
+      // LOW CONFIDENCE (> 5km or no campus match)
+      setLocationStatusMessage(
+        "No supported GRABIT campus found near your location. Please choose your campus manually below.",
+      );
+    },
+    [isDetectingLocation, activeCampus, cart.itemCount, performCampusSwitch],
+  );
 
   // Initial Load: restore any saved campus selection.
-  // GPS is never triggered here — only from the explicit Auto-Detect
-  // button, so no permission prompt fires before the student asks.
-  // The campus list & default campus data are already server-rendered
-  // (see app/customer/page.tsx) and passed in as initialCampuses/
-  // initialCampusDetails, so this only re-fetches when there's actually
-  // new work to do: a saved campus different from the one SSR picked, or
-  // a cold client-side navigation that landed here with no campus list.
   useEffect(() => {
     async function init() {
       let liveCampuses = initialCampuses;
@@ -241,32 +288,51 @@ export function StudentDashboardClient({
         setCampuses(liveCampuses);
       }
 
-      const savedId = typeof window !== "undefined" ? localStorage.getItem(SAVED_CAMPUS_KEY) : null;
+      const savedId = getActiveCampusId();
       const found = savedId ? liveCampuses.find((c) => c.id === savedId) : null;
-      if (found && found.id !== initialCampusDetails?.id) {
-        loadCampusData(found.id);
+      if (found) {
+        addRecentlyUsedCampusId(found.id);
+        if (found.id !== initialCampusDetails?.id) {
+          loadCampusData(found.id);
+        }
+      } else if (initialCampusDetails) {
+        setActiveCampusId(initialCampusDetails.id);
+        addRecentlyUsedCampusId(initialCampusDetails.id);
       }
     }
 
     init();
-    // Intentionally mount-only: this restores the saved campus once; later
-    // campus switches go through handleSelectCampus/triggerAutoDetection.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [initialCampuses, initialCampusDetails, loadCampusData]);
 
-  // Handle manual campus selection
+  // Handle manual campus selection attempt
   const handleSelectCampus = (campus: SupabaseCampus) => {
-    if (typeof window !== "undefined") {
-      localStorage.setItem(SAVED_CAMPUS_KEY, campus.id);
+    if (activeCampus && campus.id !== activeCampus.id && cart.itemCount > 0) {
+      setTargetCampusToSwitch(campus);
+      setIsCartConflictModalOpen(true);
+      return;
     }
-    setLocationStatusMessage(undefined);
-    setPendingConfirmCampus(null);
-    loadCampusData(campus.id);
+    performCampusSwitch(campus);
   };
 
-  const handleConfirmDetectedCampus = () => {
-    if (!pendingConfirmCampus) return;
-    handleSelectCampus(pendingConfirmCampus.campus);
+  const handleConfirmDetectedCampus = (campusOverride?: SupabaseCampus) => {
+    const campus = campusOverride || pendingConfirmCampus?.campus;
+    if (!campus) return;
+    if (activeCampus && campus.id !== activeCampus.id && cart.itemCount > 0) {
+      setTargetCampusToSwitch(campus);
+      setIsCartConflictModalOpen(true);
+      return;
+    }
+    performCampusSwitch(campus);
+    setIsModalOpen(false);
+  };
+
+  const handleConfirmSwitchAndClearCart = () => {
+    if (!targetCampusToSwitch) return;
+    cart.clearCart();
+    performCampusSwitch(targetCampusToSwitch);
+    setIsCartConflictModalOpen(false);
+    setTargetCampusToSwitch(null);
+    setIsModalOpen(false);
   };
 
   const isSearching = searchQuery.trim().length > 0;
@@ -363,8 +429,11 @@ export function StudentDashboardClient({
 
         {!isSearching ? (
           <>
-            {/* Recommendations */}
-            <StudentRecommendationsSection />
+            {/* Campus-Scoped Recommendations */}
+            <StudentRecommendationsSection
+              campusId={activeCampus?.id}
+              campusName={activeCampus?.name}
+            />
 
             {/* Category Chips */}
             <section className="mb-6">
@@ -506,6 +575,7 @@ export function StudentDashboardClient({
         onClose={() => {
           setIsModalOpen(false);
           setPendingConfirmCampus(null);
+          setAllNearbyCampuses(null);
         }}
         campuses={campuses}
         selectedCampusId={activeCampus.id}
@@ -514,8 +584,31 @@ export function StudentDashboardClient({
         isDetectingLocation={isDetectingLocation}
         locationStatusMessage={locationStatusMessage}
         pendingConfirmCampus={pendingConfirmCampus}
+        allNearbyCampuses={allNearbyCampuses}
         onConfirmDetectedCampus={handleConfirmDetectedCampus}
-        onDismissConfirm={() => setPendingConfirmCampus(null)}
+        onDismissConfirm={() => {
+          setPendingConfirmCampus(null);
+          setAllNearbyCampuses(null);
+        }}
+        cartItemCount={cart.itemCount}
+        currentCampusName={activeCampus.name}
+        onAttemptSwitchWithCart={(target) => {
+          setTargetCampusToSwitch(target);
+          setIsCartConflictModalOpen(true);
+        }}
+      />
+
+      {/* Cart Conflict Protection Modal */}
+      <CampusSwitchCartModal
+        isOpen={isCartConflictModalOpen}
+        onClose={() => {
+          setIsCartConflictModalOpen(false);
+          setTargetCampusToSwitch(null);
+        }}
+        targetCampus={targetCampusToSwitch}
+        currentCampusName={activeCampus.name}
+        cartItemCount={cart.itemCount}
+        onConfirmSwitchAndClearCart={handleConfirmSwitchAndClearCart}
       />
     </>
   );

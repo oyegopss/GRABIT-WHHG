@@ -105,28 +105,6 @@ export default function VendorLiveOrdersPage() {
     });
   }, []);
 
-  useEffect(() => {
-    getPendingOrderNavigation().then((res) => {
-      if (res.pending && res.orderId) {
-        openOrderById(res.orderId);
-        clearPendingOrderNavigation();
-      }
-    });
-
-    let cleanupListener: (() => void) | null = null;
-    onOrderNotificationTapped((data) => {
-      if (data && data.orderId) {
-        openOrderById(data.orderId);
-      }
-    }).then((unsub) => {
-      cleanupListener = unsub;
-    });
-
-    return () => {
-      if (cleanupListener) cleanupListener();
-    };
-  }, [openOrderById]);
-
   const applyOrders = useCallback((liveOrders: VendorOrder[]) => {
     setOrders(liveOrders);
 
@@ -140,8 +118,9 @@ export default function VendorLiveOrdersPage() {
       }
     }
 
+    // Only confirmed, paid orders in 'placed' status qualify to ring the vendor
     const currentPlacedIds = liveOrders
-      .filter((o) => o.status === "placed" && !o.isManual)
+      .filter((o) => o.status === "placed" && o.isPaid !== false && !o.isManual)
       .map((o) => o.id);
 
     if (!hasLoadedOnceRef.current) {
@@ -166,7 +145,6 @@ export default function VendorLiveOrdersPage() {
     }
   }, []);
 
-
   const fetchOrders = useCallback(async () => {
     if (!canteenId) {
       setIsLoading(false);
@@ -183,6 +161,50 @@ export default function VendorLiveOrdersPage() {
       setIsLoading(false);
     }
   }, [canteenId, applyOrders]);
+
+  useEffect(() => {
+    // 1. Check URL query parameters for direct deep-link
+    if (typeof window !== "undefined") {
+      const urlParams = new URLSearchParams(window.location.search);
+      const urlOrderId = urlParams.get("orderId");
+      if (urlOrderId) {
+        openOrderById(urlOrderId);
+      }
+    }
+
+    // 2. Check native pending navigation from killed app
+    getPendingOrderNavigation().then((res) => {
+      if (res.pending && res.orderId) {
+        openOrderById(res.orderId);
+        clearPendingOrderNavigation();
+      }
+    });
+
+    // 3. Listen to native notification tap while active
+    let cleanupListener: (() => void) | null = null;
+    onOrderNotificationTapped((data) => {
+      if (data && data.orderId) {
+        openOrderById(data.orderId);
+      }
+    }).then((unsub) => {
+      cleanupListener = unsub;
+    });
+
+    // 4. Listen to foreground FCM push notifications
+    const handleForegroundOrder = (e: Event) => {
+      const customEvent = e as CustomEvent<{ orderId?: string; orderNumber?: string }>;
+      fetchOrders();
+      if (customEvent.detail?.orderId) {
+        openOrderById(customEvent.detail.orderId);
+      }
+    };
+    window.addEventListener("grabit:vendor-new-order", handleForegroundOrder);
+
+    return () => {
+      if (cleanupListener) cleanupListener();
+      window.removeEventListener("grabit:vendor-new-order", handleForegroundOrder);
+    };
+  }, [openOrderById, fetchOrders]);
 
   useEffect(() => {
     let isMounted = true;
@@ -209,6 +231,13 @@ export default function VendorLiveOrdersPage() {
           fetchOrders();
         },
       )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "payments" },
+        () => {
+          fetchOrders();
+        },
+      )
       .subscribe();
 
     return () => {
@@ -220,16 +249,16 @@ export default function VendorLiveOrdersPage() {
   }, [canteenId]);
 
   const pendingPlacedOrders = useMemo(
-    () => orders.filter((o) => o.status === "placed"),
+    () => orders.filter((o) => o.status === "placed" && o.isPaid !== false),
     [orders],
   );
 
   useEffect(() => {
-    if (pendingPlacedOrders.length === 0) {
+    if (pendingPlacedOrders.length === 0 || isDetailModalOpen) {
       sound.stop();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingPlacedOrders.length]);
+  }, [pendingPlacedOrders.length, isDetailModalOpen]);
 
   useEffect(() => {
     document.title = pendingPlacedOrders.length > 0 ? TAB_TITLE_ALERT : TAB_TITLE_DEFAULT;

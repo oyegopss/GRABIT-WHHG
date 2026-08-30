@@ -527,11 +527,12 @@ export async function fetchPlatformConfigurations(
     }
 
     const { data, error } = await query;
+    const VALID_CATEGORIES: ConfigCategory[] = ["GENERAL", "ORDERS", "VENDOR", "OFFERS", "PAYMENTS", "REFUNDS", "NOTIFICATIONS"];
     if (!error && data && data.length > 0) {
       dbItems = data.map((d: any) => ({
         key: d.key,
         value: d.value,
-        category: d.category as ConfigCategory,
+        category: (VALID_CATEGORIES.includes(d.category) ? d.category : "GENERAL") as ConfigCategory,
         description: d.description || "",
         valueType: (d.value_type || "json") as ValueType,
         isActive: d.is_active ?? true,
@@ -547,7 +548,15 @@ export async function fetchPlatformConfigurations(
     // DB fallback
   }
 
-  let result = dbItems.length > 0 ? dbItems : [...inMemoryConfigs];
+  // Merge: start with in-memory defaults, overlay any DB rows on top (DB wins)
+  const dbKeyMap = new Map(dbItems.map((d) => [d.key, d]));
+  let result = inMemoryConfigs.map((mem) => dbKeyMap.get(mem.key) ?? mem);
+  // Also include any DB-only keys not in the in-memory seed
+  for (const dbItem of dbItems) {
+    if (!inMemoryConfigs.some((m) => m.key === dbItem.key)) {
+      result.push(dbItem);
+    }
+  }
 
   if (category && category !== "ALL") {
     result = result.filter((item) => item.category === category);

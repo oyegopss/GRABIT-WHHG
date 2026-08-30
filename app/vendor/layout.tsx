@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { RoleShellRail, type NavItem } from "@/components/shared/RoleShellNav";
 import { VendorMobileNavBar } from "@/components/vendor/VendorMobileNavBar";
 import { VendorProvider } from "@/lib/vendor/VendorContext";
+import { VendorPushInit } from "@/components/vendor/VendorPushInit";
 import { getPendingOrderNavigation, onOrderNotificationTapped } from "@/lib/vendor/orderAlertService";
 import { DashboardBackground } from "@/components/ui/dashboard-background";
 import { VendorExitModal } from "@/components/vendor/VendorExitModal";
@@ -88,6 +89,7 @@ export default function VendorLayout({ children }: { children: React.ReactNode }
 
   return (
     <VendorProvider>
+      <VendorPushInit />
       <div className="relative flex h-dvh overflow-hidden bg-[#070709] text-foreground">
         <DashboardBackground intensity="subtle" />
         <div className="relative z-10 hidden sm:flex">

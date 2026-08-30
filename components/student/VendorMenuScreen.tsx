@@ -15,6 +15,7 @@ import type { CanteenActiveOffer } from "@/lib/supabase/data";
 export interface VendorMenuScreenCanteenInfo {
   id: string;
   name: string;
+  campusId?: string | null;
   avgPrepMinutes: number;
   rating: number;
   ratingCount: string;
@@ -74,7 +75,10 @@ export function VendorMenuScreen({
 
         <VendorOffersBoard offers={offers} />
 
-        <StudentRecommendationsSection />
+        <StudentRecommendationsSection
+          campusId={canteenInfo.campusId ?? undefined}
+          campusName={canteenInfo.campusName ?? undefined}
+        />
 
         {items.length === 0 ? (
           <div className="mt-8 rounded-xl border border-border-subtle bg-surface-elevated p-6 text-center text-body-sm text-muted">

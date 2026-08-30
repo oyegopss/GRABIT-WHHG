@@ -103,8 +103,13 @@ export async function createOperationalNotification(
       }
     }
 
-    // 2. Anti-Noise Hourly Limit for Vendors (Max 5 non-critical alerts/hour)
-    if (params.recipientType === "vendor" && params.canteenId && params.severity !== "CRITICAL") {
+    // 2. Anti-Noise Hourly Limit for Vendors (Max 5 non-critical alerts/hour, NEVER throttle essential NEW_ORDER alerts)
+    if (
+      params.recipientType === "vendor" &&
+      params.canteenId &&
+      params.severity !== "CRITICAL" &&
+      params.type !== "NEW_ORDER"
+    ) {
       const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
       const { count } = await supabase
         .from("operational_notifications")
@@ -117,30 +122,55 @@ export async function createOperationalNotification(
       }
     }
 
+    const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const safeUuid = (val?: string | null): string | null => {
+      if (!val || typeof val !== "string") return null;
+      return UUID_REGEX.test(val.trim()) ? val.trim() : null;
+    };
+
     // 3. Insert Operational Notification
-    const { data: inserted, error } = await supabase
+    const payload = {
+      recipient_type: params.recipientType,
+      recipient_user_id: safeUuid(params.recipientUserId),
+      canteen_id: safeUuid(params.canteenId),
+      campus_id: safeUuid(params.campusId),
+      type: params.type,
+      severity: params.severity,
+      title: params.title,
+      message: params.message,
+      action_url: params.actionUrl ?? null,
+      related_order_id: safeUuid(params.relatedOrderId),
+      related_menu_item_id: safeUuid(params.relatedMenuItemId),
+      related_canteen_id: safeUuid(params.relatedCanteenId),
+      dedupe_key: params.dedupeKey ?? null,
+      status: "OPEN",
+    };
+
+    let { data: inserted, error } = await supabase
       .from("operational_notifications")
-      .insert({
-        recipient_type: params.recipientType,
-        recipient_user_id: params.recipientUserId ?? null,
-        canteen_id: params.canteenId ?? null,
-        campus_id: params.campusId ?? null,
-        type: params.type,
-        severity: params.severity,
-        title: params.title,
-        message: params.message,
-        action_url: params.actionUrl ?? null,
-        related_order_id: params.relatedOrderId ?? null,
-        related_menu_item_id: params.relatedMenuItemId ?? null,
-        related_canteen_id: params.relatedCanteenId ?? null,
-        dedupe_key: params.dedupeKey ?? null,
-        status: "OPEN",
-      })
+      .insert(payload)
       .select("id")
       .single();
 
-    if (error) {
-      console.warn("Could not insert operational notification (safe warning):", error.message);
+    // Fallback: If foreign key constraint failed (e.g. order row deleted or not yet committed), insert without FKs
+    if (error && error.message?.includes("foreign key")) {
+      const fallbackPayload = {
+        ...payload,
+        related_order_id: null,
+        related_menu_item_id: null,
+        related_canteen_id: null,
+      };
+      const retry = await supabase
+        .from("operational_notifications")
+        .insert(fallbackPayload)
+        .select("id")
+        .single();
+      inserted = retry.data;
+      error = retry.error;
+    }
+
+    if (error || !inserted) {
+      console.warn("Could not insert operational notification (safe warning):", error?.message);
       return { success: false };
     }
 

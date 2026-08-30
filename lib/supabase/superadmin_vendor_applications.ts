@@ -229,7 +229,7 @@ export async function fetchVendorApplicationDetails(id: string): Promise<{
     const supabase = getSupabaseAdminClient();
     const { data: a, error } = await supabase
       .from("vendor_applications")
-      .select("id, canteen_id, vendor_user_id, vendor_name, owner_name, email, phone, campus_id, category, description, address, application_status, kyc_status, vendor_status, kyc_documents, rejection_reason, suspension_reason, reviewed_by, reviewed_at, created_at, updated_at, campuses(name), canteens(name, bank_account_number)")
+      .select("id, canteen_id, vendor_user_id, vendor_name, owner_name, email, phone, campus_id, category, description, address, application_status, kyc_status, vendor_status, kyc_documents, rejection_reason, suspension_reason, reviewed_by, reviewed_at, created_at, updated_at, campuses(name), canteens(name, payout_bank_account_number)")
       .eq("id", id)
       .single();
 
@@ -288,7 +288,7 @@ export async function fetchVendorApplicationDetails(id: string): Promise<{
       updatedAt: a.updated_at,
     };
 
-    const hasBank = Boolean((a as any).canteens?.bank_account_number);
+    const hasBank = Boolean((a as any).canteens?.payout_bank_account_number);
 
     const prerequisites: PrerequisiteChecklist = {
       hasValidUser: Boolean(application.vendorUserId),

@@ -150,7 +150,7 @@ function VendorAuthFormContent() {
     }
 
     setIsSubmitting(true);
-    const res = await sendPasswordResetEmail(email);
+    const res = await sendPasswordResetEmail(email, "vendor");
     setIsSubmitting(false);
 
     if (!res.ok) {

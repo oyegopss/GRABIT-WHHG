@@ -35,10 +35,11 @@ async function runCashfreePayoutsTestSuite() {
   // --- 1. PG remains functional and independent of Payouts config ---
   assert(isCashfreeConfigured() === true, "Cashfree PG: remains configured and unaffected by Payouts module");
 
-  // --- 2. Payouts credentials are genuinely absent — NOT_CONFIGURED is the honest state ---
+  // --- 2. Payouts credentials accurately reported ---
+  const hasPayoutsEnv = Boolean(process.env.CASHFREE_PAYOUTS_CLIENT_ID && process.env.CASHFREE_PAYOUTS_CLIENT_SECRET);
   assert(
-    isCashfreePayoutsConfigured() === false,
-    "Missing Payouts Credentials: CASHFREE_PAYOUTS_CLIENT_ID/SECRET are not set, isCashfreePayoutsConfigured() correctly reports false",
+    isCashfreePayoutsConfigured() === hasPayoutsEnv,
+    `Payouts Credentials State: isCashfreePayoutsConfigured() accurately reports ${hasPayoutsEnv}`,
   );
 
   // --- 3. Payouts module file never imports/reads the internal ledger table ---

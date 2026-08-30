@@ -361,9 +361,10 @@ export async function createSuperAdminIncident(
     updatedAt: new Date().toISOString(),
   };
 
+  let dbInsertOk = false;
   try {
     const supabase = getSupabaseAdminClient();
-    await supabase.from("superadmin_incidents").insert({
+    const { error: insertErr } = await supabase.from("superadmin_incidents").insert({
       id: newIncident.id,
       incident_number: newIncident.incidentNumber,
       title: newIncident.title,
@@ -381,14 +382,21 @@ export async function createSuperAdminIncident(
       created_by: adminId,
     });
 
-    await supabase.from("superadmin_incident_events").insert({
-      incident_id: newIncident.id,
-      event_type: "DETECTED",
-      message: `Incident ${incidentNumber} created by Super Admin`,
-      actor_admin_id: adminId,
-    });
+    if (!insertErr) {
+      dbInsertOk = true;
+      await supabase.from("superadmin_incident_events").insert({
+        incident_id: newIncident.id,
+        event_type: "DETECTED",
+        message: `Incident ${incidentNumber} created by Super Admin`,
+        actor_admin_id: adminId,
+      });
+    }
   } catch {
-    // Fallback store
+    // DB unavailable
+  }
+
+  // Always populate fallback store so in-memory operations work even when DB is unavailable
+  if (!dbInsertOk) {
     fallbackIncidents.unshift(newIncident);
     fallbackEvents[newIncident.id] = [
       {
@@ -465,6 +473,7 @@ export async function updateIncidentStatusAndSeverity(
     }
   }
 
+  let dbUpdateOk = false;
   try {
     const supabase = getSupabaseAdminClient();
     const updateFields: any = {
@@ -489,16 +498,23 @@ export async function updateIncidentStatusAndSeverity(
     if (payload.internalNotes) updateFields.internal_notes = payload.internalNotes;
     if (payload.incidentCommanderId) updateFields.incident_commander_id = payload.incidentCommanderId;
 
-    await supabase.from("superadmin_incidents").update(updateFields).eq("id", incident.id);
+    const { error: updateErr } = await supabase.from("superadmin_incidents").update(updateFields).eq("id", incident.id);
 
-    await supabase.from("superadmin_incident_events").insert({
-      incident_id: incident.id,
-      event_type: payload.status ? "STATUS_CHANGED" : "UPDATED",
-      message: `Incident ${incident.incidentNumber} updated status to ${targetStatus} and severity to ${targetSeverity}`,
-      actor_admin_id: adminId,
-    });
+    if (!updateErr) {
+      dbUpdateOk = true;
+      await supabase.from("superadmin_incident_events").insert({
+        incident_id: incident.id,
+        event_type: payload.status ? "STATUS_CHANGED" : "UPDATED",
+        message: `Incident ${incident.incidentNumber} updated status to ${targetStatus} and severity to ${targetSeverity}`,
+        actor_admin_id: adminId,
+      });
+    }
   } catch {
-    // In-memory fallback
+    // DB unavailable
+  }
+
+  // Always update in-memory fallback so reads see the correct state
+  if (!dbUpdateOk) {
     incident.status = targetStatus;
     incident.severity = targetSeverity;
     if (payload.resolution) incident.resolution = payload.resolution;
@@ -602,9 +618,10 @@ export async function createOrUpdateIncidentPostmortem(
     updatedAt: new Date().toISOString(),
   };
 
+  let dbUpsertOk = false;
   try {
     const supabase = getSupabaseAdminClient();
-    await supabase.from("superadmin_incident_postmortems").upsert({
+    const { error: upsertErr } = await supabase.from("superadmin_incident_postmortems").upsert({
       incident_id: payload.incidentId,
       root_cause: payload.rootCause,
       impact_summary: payload.impactSummary,
@@ -617,7 +634,12 @@ export async function createOrUpdateIncidentPostmortem(
       status: postmortem.status,
       updated_at: new Date().toISOString(),
     });
+    if (!upsertErr) dbUpsertOk = true;
   } catch {
+    // DB unavailable
+  }
+
+  if (!dbUpsertOk) {
     fallbackPostmortems[payload.incidentId] = postmortem;
   }
 

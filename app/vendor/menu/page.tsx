@@ -251,7 +251,7 @@ function VendorMenuManagementPageInner() {
 
   return (
     <div className="min-h-dvh bg-background text-foreground flex flex-col">
-      <main className="flex-1 px-4 sm:px-6 md:px-8 pt-7 sm:pt-9 md:pt-10 pb-24 sm:pb-12 max-w-5xl mx-auto w-full flex flex-col gap-6">
+      <main className="flex-1 px-4 sm:px-6 md:px-8 pt-[calc(var(--safe-area-inset-top,0px)+1.5rem)] sm:pt-[calc(var(--safe-area-inset-top,0px)+2rem)] md:pt-[calc(var(--safe-area-inset-top,0px)+2.5rem)] pb-24 sm:pb-12 max-w-5xl mx-auto w-full flex flex-col gap-6">
         {notification && (
           <div className="rounded-xl border border-primary/30 bg-primary/10 p-3 text-center text-body-sm font-semibold text-primary animate-fade-in">
             {notification}

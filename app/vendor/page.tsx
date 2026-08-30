@@ -49,6 +49,7 @@ import { useVendor } from "@/lib/vendor/VendorContext";
 import { createClient } from "@/lib/supabase/client";
 import { useOrderAlertSound } from "@/lib/vendor/useOrderAlertSound";
 import { hardNavigate } from "@/lib/auth/redirect";
+import { isOrderAlreadyAlerted, markOrderAlerted } from "@/lib/vendor/orderAlertService";
 
 const TAB_TITLE_DEFAULT = "GrabIt Vendor";
 const TAB_TITLE_ALERT = "🔔 NEW ORDER — GRABIT Vendor";
@@ -95,20 +96,27 @@ export default function VendorActiveOrdersPage() {
   const applyOrders = useCallback((liveOrders: VendorOrder[]) => {
     setOrders(liveOrders);
 
+    // Only confirmed, paid orders in 'placed' status qualify to ring the vendor
     const currentPlacedIds = liveOrders
-      .filter((o) => o.status === "placed")
+      .filter((o) => o.status === "placed" && o.isPaid !== false && !o.isManual)
       .map((o) => o.id);
 
     if (!hasLoadedOnceRef.current) {
-      currentPlacedIds.forEach((id) => alertedOrderIdsRef.current.add(id));
+      currentPlacedIds.forEach((id) => {
+        alertedOrderIdsRef.current.add(id);
+        markOrderAlerted(id);
+      });
       hasLoadedOnceRef.current = true;
       return;
     }
 
     const genuinelyNewIds = currentPlacedIds.filter(
-      (id) => !alertedOrderIdsRef.current.has(id),
+      (id) => !alertedOrderIdsRef.current.has(id) && !isOrderAlreadyAlerted(id),
     );
-    currentPlacedIds.forEach((id) => alertedOrderIdsRef.current.add(id));
+    currentPlacedIds.forEach((id) => {
+      alertedOrderIdsRef.current.add(id);
+      markOrderAlerted(id);
+    });
 
     if (genuinelyNewIds.length > 0) {
       soundRef.current.start();
@@ -208,12 +216,27 @@ export default function VendorActiveOrdersPage() {
           fetchAnalytics(timeframe);
         },
       )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "payments" },
+        () => {
+          fetchOrders();
+          fetchAnalytics(timeframe);
+        },
+      )
       .subscribe();
+
+    const handleForegroundOrder = () => {
+      fetchOrders();
+      fetchAnalytics(timeframe);
+    };
+    window.addEventListener("grabit:vendor-new-order", handleForegroundOrder);
 
     return () => {
       isMounted = false;
       if (channel) supabase.removeChannel(channel);
       if (cleanupSync) cleanupSync();
+      window.removeEventListener("grabit:vendor-new-order", handleForegroundOrder);
       sound.stop();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -224,6 +247,7 @@ export default function VendorActiveOrdersPage() {
       orders.filter(
         (o) =>
           o.status === "placed" &&
+          o.isPaid !== false &&
           !o.isManual &&
           o.orderType !== "MANUAL_CASH_ORDER" &&
           !o.orderNumber.includes("-M-")

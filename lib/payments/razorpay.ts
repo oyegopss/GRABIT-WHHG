@@ -1,3 +1,4 @@
+import "server-only";
 import crypto from "crypto";
 
 export type GoldPlanId = "gold_monthly" | "gold_semester";

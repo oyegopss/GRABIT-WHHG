@@ -10,15 +10,16 @@ interface CashfreePayoutWebhookPayload {
     referenceId?: string;
     status?: "SUCCESS" | "FAILED" | "PENDING" | "REVERSED" | string;
     reason?: string;
+    utr?: string;
   };
 }
 
 /**
  * Cashfree Payouts status webhook — completely separate from the PG
- * webhook at /api/payments/cashfree/webhook. Verifies signature, is
- * idempotent (payment_webhook_events reused with gateway='cashfree_payout'),
- * and only ever flips a settlement to PAID via the confirm_vendor_payout
- * RPC, which itself is idempotent per cashfree_payout_id.
+ * webhook at /api/payments/cashfree/webhook.
+ *
+ * Verifies HMAC-SHA256 signature, deduplicates via payment_webhook_events,
+ * and executes state transition via confirm_vendor_payout RPC.
  */
 export async function POST(request: Request) {
   const rawBody = await request.text();
@@ -37,8 +38,8 @@ export async function POST(request: Request) {
   }
 
   const transferId = payload.data?.transferId ?? "";
-  const status = payload.data?.status;
-  const eventId = `payout:${payload.event}:${transferId}:${status}`;
+  const rawStatus = payload.data?.status;
+  const eventId = `payout:${payload.event}:${transferId}:${rawStatus}`;
 
   const admin = getSupabaseAdminClient();
 
@@ -56,26 +57,38 @@ export async function POST(request: Request) {
     event_id: eventId,
     event_type: payload.event,
     gateway: "cashfree",
-    status: status ?? null,
-    payload_summary: { transferId, status },
+    status: rawStatus ?? null,
+    payload_summary: { transferId, status: rawStatus, utr: payload.data?.utr },
     processed_at: new Date().toISOString(),
   });
 
-  if (!transferId || (status !== "SUCCESS" && status !== "FAILED")) {
+  if (!transferId) {
+    return NextResponse.json({ ok: true });
+  }
+
+  const normalizedStatus =
+    rawStatus === "SUCCESS"
+      ? "PAID"
+      : rawStatus === "FAILED" || rawStatus === "REJECTED"
+        ? "FAILED"
+        : rawStatus === "REVERSED"
+          ? "REVERSED"
+          : null;
+
+  if (!normalizedStatus) {
     return NextResponse.json({ ok: true });
   }
 
   try {
     const { data: result } = await admin.rpc("confirm_vendor_payout", {
       p_cashfree_payout_id: transferId,
-      p_status: status === "SUCCESS" ? "PAID" : "FAILED",
-      p_failure_reason: status === "FAILED" ? (payload.data?.reason ?? "Cashfree reported FAILED.") : null,
+      p_status: normalizedStatus,
+      p_failure_reason: normalizedStatus === "FAILED" ? (payload.data?.reason ?? "Cashfree reported transfer failed.") : null,
     });
 
     const confirmResult = result as { settlementId: string; payoutStatus: string; alreadyProcessed: boolean } | null;
 
-    // Telegram confirmation ONLY on a freshly-confirmed PAID — never on
-    // FAILED/PROCESSING, and never twice for the same payout.
+    // Telegram confirmation ONLY on a freshly-confirmed PAID
     if (confirmResult && confirmResult.payoutStatus === "PAID" && !confirmResult.alreadyProcessed) {
       const { data: settlement } = await admin
         .from("vendor_settlements")

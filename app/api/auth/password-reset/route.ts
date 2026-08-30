@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { checkRateLimit, getClientIp } from "@/lib/security/rate_limit";
+import { checkRateLimit, createRateLimitResponse, getClientIp, RATE_LIMIT_TIERS } from "@/lib/security/rate_limit";
 import { getSupabaseAdminClient } from "@/lib/supabase/admin";
 
 /**
@@ -29,27 +29,39 @@ export async function POST(request: Request) {
   try {
     const body = await request.json().catch(() => ({}));
     const email = typeof body.email === "string" ? body.email.trim() : "";
+    const role: "vendor" | "student" | "superadmin" =
+      body.role === "vendor" ? "vendor" : body.role === "superadmin" ? "superadmin" : "student";
 
     if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       return NextResponse.json({ ok: false, error: "Please enter a valid email address." }, { status: 400 });
     }
 
     // Throttle per-email and per-IP independently so neither a single
-    // spammed address nor a single source can exhaust the mailer, without
-    // revealing which bound tripped (both paths return the same generic
-    // response).
-    const emailLimit = checkRateLimit(`password-reset:${email.toLowerCase()}`, 5, 15 * 60_000);
-    const ipLimit = checkRateLimit(`password-reset-ip:${getClientIp(request)}`, 20, 15 * 60_000);
-    if (emailLimit.limited || ipLimit.limited) {
-      return NextResponse.json(
-        { ok: false, error: "Too many requests. Please wait a few minutes and try again." },
-        { status: 429 },
-      );
+    // spammed address nor a single source can exhaust the mailer
+    const emailLimit = checkRateLimit(
+      `password-reset:${email.toLowerCase()}`,
+      RATE_LIMIT_TIERS.PASSWORD_RESET.limit,
+      RATE_LIMIT_TIERS.PASSWORD_RESET.windowMs,
+    );
+    const ipLimit = checkRateLimit(
+      `password-reset-ip:${getClientIp(request)}`,
+      RATE_LIMIT_TIERS.AUTH.limit * 2,
+      RATE_LIMIT_TIERS.AUTH.windowMs,
+    );
+
+    if (emailLimit.limited) {
+      return createRateLimitResponse(emailLimit, "Too many password reset requests for this email. Please wait before trying again.");
+    }
+    if (ipLimit.limited) {
+      return createRateLimitResponse(ipLimit, "Too many requests from this network. Please wait before trying again.");
     }
 
     const admin = getSupabaseAdminClient();
     const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://grabit.ventures";
-    const redirectTo = `${siteUrl.replace(/\/$/, "")}/auth/reset-password`;
+    const redirectTo =
+      role === "vendor"
+        ? `${siteUrl.replace(/\/$/, "")}/auth/reset-password?role=vendor`
+        : `${siteUrl.replace(/\/$/, "")}/auth/reset-password`;
 
     const { data, error } = await admin.auth.admin.generateLink({
       type: "recovery",
@@ -69,6 +81,7 @@ export async function POST(request: Request) {
     const sendResult = await sendPasswordResetEmail({
       email,
       actionLink: data.properties.action_link,
+      role,
     });
 
     if (!sendResult.ok) {

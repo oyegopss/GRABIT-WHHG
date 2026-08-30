@@ -126,6 +126,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [fetchRoleAndProfile, refreshAuth]);
 
   const signOut = async () => {
+    try {
+      const { unregisterStudentPushToken } = await import("@/lib/notifications/push_client");
+      await unregisterStudentPushToken();
+    } catch {
+      // Non-critical
+    }
+    try {
+      const { unregisterVendorPushToken } = await import("@/lib/vendor/vendorPushClient");
+      await unregisterVendorPushToken();
+    } catch {
+      // Non-critical
+    }
     const supabase = createClient();
     await supabase.auth.signOut();
     setUser(null);

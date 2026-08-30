@@ -50,19 +50,19 @@ export async function POST(request: Request) {
 
     const supabase = getSupabaseAdminClient();
 
+    // Update canonical bank account columns on canteens table
     const { error: updateErr } = await supabase
       .from("canteens")
       .update({
-        bank_account_holder: accountHolderName,
-        bank_name: bankName,
-        bank_account_number: accountNumber,
-        ifsc_code: ifscCode,
-        payout_account_verified: true,
+        owner_name: accountHolderName,
+        payout_bank_account_number: accountNumber,
+        payout_ifsc: ifscCode,
+        payout_kyc_status: "VERIFIED",
       })
       .eq("id", vendorCtx.canteenId);
 
     if (updateErr) {
-      console.error("Bank account update error:", updateErr);
+      console.error("Bank account update error:", updateErr.message);
       return NextResponse.json(
         { ok: false, error: updateErr.message || "Failed to save bank account details." },
         { status: 400 },
@@ -71,7 +71,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ ok: true });
   } catch (err) {
-    console.error("Bank account save error:", err);
+    console.error("Bank account save error:", err instanceof Error ? err.message : "Unknown error");
     return NextResponse.json(
       { ok: false, error: "Internal server error." },
       { status: 500 },

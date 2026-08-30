@@ -1,18 +1,23 @@
 import { registerPlugin } from "@capacitor/core";
 import { isNativePlatform } from "@/lib/capacitor/platform";
 
+export interface NotificationPermissionDetails {
+  granted: boolean;
+  areNotificationsEnabled: boolean;
+  postNotificationsGranted: boolean;
+  channelExists: boolean;
+  channelBlocked: boolean;
+  channelSoundEnabled: boolean;
+  channelVibrationEnabled: boolean;
+  channelImportance: number;
+  isPermanentlyDenied: boolean;
+}
+
 interface OrderAlertPluginType {
-  checkNotificationPermission: () => Promise<{
-    granted: boolean;
-    areNotificationsEnabled: boolean;
-    isPermanentlyDenied: boolean;
-  }>;
-  requestNotificationPermission: () => Promise<{
-    granted: boolean;
-    areNotificationsEnabled: boolean;
-    isPermanentlyDenied: boolean;
-  }>;
+  checkNotificationPermission: () => Promise<NotificationPermissionDetails>;
+  requestNotificationPermission: () => Promise<NotificationPermissionDetails>;
   openNotificationSettings: () => Promise<void>;
+  openChannelNotificationSettings: () => Promise<void>;
   showOrderNotification: (options: {
     orderId: string;
     orderNumber: string;
@@ -38,20 +43,6 @@ interface OrderAlertPluginType {
   ) => Promise<{ remove: () => Promise<void> }>;
 }
 
-// Two compounding Capacitor gotchas made every OrderAlert call after the
-// first one in a page's lifetime fail silently:
-//  1. registerPlugin() warns and returns a broken registration if called
-//     twice for the same name — this used to be called fresh on every
-//     getNativePlugin() invocation instead of once, cached.
-//  2. The object registerPlugin() returns is a Proxy whose `get` trap
-//     answers *any* property access (including `.then`) with a callable
-//     function. Returning that proxy as the resolved value of an `async`
-//     function makes the JS runtime itself treat it as a thenable and call
-//     `proxy.then(resolve, reject)` — which throws
-//     "OrderAlert.then() is not implemented on android", since "then" isn't
-//     a real plugin method. Keeping this resolver synchronous (a static
-//     import instead of a dynamic one) means the proxy is never handed back
-//     through an async return, so that auto-chasing never triggers.
 let cachedPlugin: OrderAlertPluginType | null | undefined;
 
 function getNativePlugin(): OrderAlertPluginType | null {
@@ -67,7 +58,7 @@ function getNativePlugin(): OrderAlertPluginType | null {
 }
 
 // In-memory & storage deduplication cache to ensure each order is alerted exactly ONCE
-const ALERTED_ORDERS_STORAGE_KEY = "grabit_vendor_alerted_orders_v1";
+const ALERTED_ORDERS_STORAGE_KEY = "grabit_vendor_alerted_orders_v2";
 const memoryAlertedIds = new Set<string>();
 
 function loadStoredAlertedIds(): Set<string> {
@@ -111,27 +102,35 @@ export function markOrderAlerted(orderId: string) {
 }
 
 /**
- * Checks Android notification permission status.
+ * Checks Android notification permission & notification channel status in real time.
  */
-export async function checkNotificationPermission(): Promise<{
-  granted: boolean;
-  areNotificationsEnabled: boolean;
-  isPermanentlyDenied: boolean;
-}> {
+export async function checkNotificationPermission(): Promise<NotificationPermissionDetails> {
   const plugin = getNativePlugin();
   if (!plugin) {
-    // Web / browser environment: check Notification API if available
+    // Web / browser environment: check standard Notification API
     if (typeof window !== "undefined" && "Notification" in window) {
       const granted = Notification.permission === "granted";
       return {
         granted,
         areNotificationsEnabled: Notification.permission !== "denied",
+        postNotificationsGranted: granted,
+        channelExists: true,
+        channelBlocked: false,
+        channelSoundEnabled: true,
+        channelVibrationEnabled: true,
+        channelImportance: 4,
         isPermanentlyDenied: Notification.permission === "denied",
       };
     }
     return {
       granted: true,
       areNotificationsEnabled: true,
+      postNotificationsGranted: true,
+      channelExists: true,
+      channelBlocked: false,
+      channelSoundEnabled: true,
+      channelVibrationEnabled: true,
+      channelImportance: 4,
       isPermanentlyDenied: false,
     };
   }
@@ -143,19 +142,21 @@ export async function checkNotificationPermission(): Promise<{
     return {
       granted: false,
       areNotificationsEnabled: false,
+      postNotificationsGranted: false,
+      channelExists: false,
+      channelBlocked: true,
+      channelSoundEnabled: false,
+      channelVibrationEnabled: false,
+      channelImportance: 0,
       isPermanentlyDenied: true,
     };
   }
 }
 
 /**
- * Requests Android notification runtime permission (POST_NOTIFICATIONS).
+ * Requests Android notification runtime permission (POST_NOTIFICATIONS on Android 13+).
  */
-export async function requestNotificationPermission(): Promise<{
-  granted: boolean;
-  areNotificationsEnabled: boolean;
-  isPermanentlyDenied: boolean;
-}> {
+export async function requestNotificationPermission(): Promise<NotificationPermissionDetails> {
   const plugin = getNativePlugin();
   if (!plugin) {
     if (typeof window !== "undefined" && "Notification" in window) {
@@ -164,14 +165,16 @@ export async function requestNotificationPermission(): Promise<{
       return {
         granted,
         areNotificationsEnabled: res !== "denied",
+        postNotificationsGranted: granted,
+        channelExists: true,
+        channelBlocked: false,
+        channelSoundEnabled: true,
+        channelVibrationEnabled: true,
+        channelImportance: 4,
         isPermanentlyDenied: res === "denied",
       };
     }
-    return {
-      granted: true,
-      areNotificationsEnabled: true,
-      isPermanentlyDenied: false,
-    };
+    return checkNotificationPermission();
   }
 
   try {
@@ -196,7 +199,6 @@ export async function openNotificationSettings(): Promise<void> {
     }
   }
 
-  // Fallback to NativeSettings general app info
   try {
     const { openAppSettings } = await import("@/lib/capacitor/settings");
     await openAppSettings();
@@ -206,7 +208,24 @@ export async function openNotificationSettings(): Promise<void> {
 }
 
 /**
- * Triggers a test order alert notification on the device.
+ * Opens direct Notification Channel Settings for GRABIT New Orders on Android OS.
+ */
+export async function openChannelNotificationSettings(): Promise<void> {
+  const plugin = getNativePlugin();
+  if (plugin) {
+    try {
+      await plugin.openChannelNotificationSettings();
+      return;
+    } catch (err) {
+      console.warn("[orderAlertService] Could not open channel settings:", err);
+    }
+  }
+
+  await openNotificationSettings();
+}
+
+/**
+ * Triggers a test order alert notification on the device with sound and vibration.
  */
 export async function sendTestOrderAlert(): Promise<boolean> {
   const plugin = getNativePlugin();
@@ -222,8 +241,11 @@ export async function sendTestOrderAlert(): Promise<boolean> {
 
   // Web fallback test audio
   try {
-    const audio = new Audio("/sounds/new-order.mp3");
-    await audio.play();
+    const { orderAlertSoundManager } = await import("./orderAlertSoundManager");
+    orderAlertSoundManager.start();
+    setTimeout(() => {
+      orderAlertSoundManager.stop();
+    }, 4000);
     return true;
   } catch (err) {
     console.warn("[orderAlertService] Web audio fallback failed:", err);

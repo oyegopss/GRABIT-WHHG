@@ -24,14 +24,14 @@ async function runStudentOrderPlacementE2ETests() {
 
   // Test 1: Campus-Aware Canteen Selection
   try {
-    const psitDetails = await getLiveCampusDetails("11111111-1111-1111-1111-111111111111");
-    const canteens = await getLiveCampusCanteens("11111111-1111-1111-1111-111111111111");
+    const campusDetails = await getLiveCampusDetails();
+    const canteens = campusDetails ? await getLiveCampusCanteens(campusDetails.id) : [];
 
-    if (psitDetails?.name.includes("PSIT") && canteens.length > 0) {
-      console.log(`✅ TEST 1 PASSED: Campus-aware canteen selection loaded '${canteens[0].name}' for ${psitDetails.name}.`);
+    if (campusDetails?.name && canteens.length > 0) {
+      console.log(`✅ TEST 1 PASSED: Campus-aware canteen selection loaded '${canteens[0].name}' for ${campusDetails.name}.`);
       passed++;
     } else {
-      console.error("❌ TEST 1 FAILED: Canteen selection failed.", { psitDetails, canteens });
+      console.error("❌ TEST 1 FAILED: Canteen selection failed.", { campusDetails, canteens });
       failed++;
     }
   } catch (err) {

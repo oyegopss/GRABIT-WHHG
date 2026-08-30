@@ -45,7 +45,8 @@ export function getCategoryForType(type: string): NotificationCategory {
 }
 
 export function getDeepLinkForNotification(item: OperationalNotificationItem): string {
-  if (item.actionUrl) return item.actionUrl;
+  if (item.actionUrl && item.actionUrl !== "/vendor") return item.actionUrl;
+  if (item.relatedOrderId) return `/vendor/orders?orderId=${item.relatedOrderId}`;
 
   const category = getCategoryForType(item.type);
   switch (category) {

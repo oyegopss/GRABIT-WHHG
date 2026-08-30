@@ -1,4 +1,9 @@
+import "server-only";
 import { createClient as createAdminClient, type SupabaseClient } from "@supabase/supabase-js";
+
+if (typeof window !== "undefined") {
+  throw new Error("FATAL: lib/supabase/admin is a server-only module and cannot be imported in client components or browser JavaScript.");
+}
 
 /**
  * Returns the Supabase service-role key, or throws immediately if it's

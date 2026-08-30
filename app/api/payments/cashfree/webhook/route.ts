@@ -155,37 +155,15 @@ async function handleOrderPaymentEvent(
       return;
     }
 
-    await admin
-      .from("payments")
-      .update({
-        status: "success",
-        cashfree_payment_id: cfPaymentId || null,
-        gateway_response: payload.data,
-        webhook_received_at: new Date().toISOString(),
-        paid_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", payment.id);
-
-    try {
-      const { createStudentNotification } = await import("@/lib/notifications/student_notifications");
-      const { data: orderRow } = await admin.from("orders").select("student_id, order_number").eq("id", payment.order_id).maybeSingle();
-      if (orderRow) {
-        await createStudentNotification({
-          userId: orderRow.student_id,
-          type: "PAYMENT_SUCCESS",
-          title: "Payment successful",
-          message: `Your payment for order ${orderRow.order_number} was successful.`,
-          severity: "SUCCESS",
-          category: "PAYMENTS",
-          relatedOrderId: payment.order_id,
-          actionUrl: `/customer/orders/${payment.order_id}`,
-          dedupeKey: `cashfree-paid:${payment.id}`,
-        });
-      }
-    } catch {
-      // Non-critical.
-    }
+    const { confirmOrderPaymentSuccess } = await import("@/lib/payments/order_payment_confirmation");
+    await confirmOrderPaymentSuccess({
+      orderId: payment.order_id,
+      paymentId: payment.id,
+      cashfreeOrderId,
+      cashfreePaymentId: cfPaymentId || null,
+      gatewayResponse: payload.data,
+      actorReason: "Payment verified successfully via Cashfree webhook",
+    });
 
     // Order confirmation email — this is the actual payment-confirmed
     // moment for a prepaid (Cashfree) order, mirroring the wallet-order

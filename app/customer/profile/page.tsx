@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { GrabItLogo } from "@/components/shared/GrabItLogo";
 import { TrackEventOnMount } from "@/components/shared/TrackEventOnMount";
@@ -9,6 +9,7 @@ import { EditProfileModal } from "@/components/student/profile/EditProfileModal"
 import { SavedAddressesModal } from "@/components/student/profile/SavedAddressesModal";
 import { GrabItGoldCard } from "@/components/student/profile/GrabItGoldCard";
 import { ProfileMenuItem } from "@/components/student/profile/ProfileMenuItem";
+import { CampusSelectorModal } from "@/components/student/CampusSelectorModal";
 import {
   getLiveStudentProfile,
   getLiveStudentSubscription,
@@ -16,6 +17,15 @@ import {
   type StudentProfileDetails,
   type StudentSubscriptionDetails,
 } from "@/lib/supabase/student_profile";
+import {
+  getLiveCampusList,
+  type SupabaseCampus,
+} from "@/lib/supabase/data";
+import {
+  getActiveCampusId,
+  setActiveCampusId,
+  addRecentlyUsedCampusId,
+} from "@/lib/campus/campus_storage";
 import { createClient } from "@/lib/supabase/client";
 import type { GoldPlanId } from "@/lib/payments/gold_plans";
 import { unregisterStudentPushToken } from "@/lib/notifications/push_client";
@@ -24,6 +34,9 @@ export default function StudentProfilePage() {
   const router = useRouter();
   const [profile, setProfile] = useState<StudentProfileDetails | null>(null);
   const [subscription, setSubscription] = useState<StudentSubscriptionDetails | null>(null);
+  const [campuses, setCampuses] = useState<SupabaseCampus[]>([]);
+  const [activeCampus, setActiveCampus] = useState<SupabaseCampus | null>(null);
+  const [isCampusModalOpen, setIsCampusModalOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [isAddressModalOpen, setIsAddressModalOpen] = useState(false);
@@ -31,49 +44,66 @@ export default function StudentProfilePage() {
   const [isGoldProcessing, setIsGoldProcessing] = useState(false);
   const [goldError, setGoldError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let isMounted = true;
-    async function loadData() {
-      setIsLoading(true);
-      const [liveProf, liveSub] = await Promise.all([
-        getLiveStudentProfile(),
-        getLiveStudentSubscription(),
-      ]);
+  const loadData = useCallback(async () => {
+    setIsLoading(true);
+    const [liveProf, liveSub, liveCampuses] = await Promise.all([
+      getLiveStudentProfile(),
+      getLiveStudentSubscription(),
+      getLiveCampusList(),
+    ]);
 
-      if (isMounted) {
-        if (liveProf) {
-          setProfile(liveProf);
-        } else {
-          // Default fallback profile structure
-          setProfile({
-            id: "guest",
-            email: "student@grabit.in",
-            fullName: "Grabit Customer",
-            phone: "+91 98765 43210",
-            role: "student",
-            campusId: "",
-            campusName: "Campus",
-            grabitUserId: "GRB-FE1B32",
-            avatarUrl:
-              "https://lh3.googleusercontent.com/aida-public/AB6AXuDp0UC7dpD4OUKonC4W287WPg0Gnic80gYNaQUlT5JeKVdN9Qi2mZGcvFp3hdZ05VTrWmjRr-Twvu8fFinGwpcdg0gPV1peTnf5OPY7ytoGnVZ1f_q1Op19HPKnEO3X1GvKha2kWOQqpSRkpPyRjGByLCeqU7qcar10tg5xTuhvKY_nuw8tk-fA7oJzUcBXhBRktsp1XTnf94v1SNBiI-7XR0F0i1Y6PtSMwdTnJwHi4QisCMfCh7_R",
-          });
-        }
-        setSubscription(liveSub);
-        setIsLoading(false);
-      }
+    setCampuses(liveCampuses);
+
+    const savedId = getActiveCampusId();
+    const currentCampus = liveCampuses.find((c) => c.id === savedId) || liveCampuses[0] || null;
+    setActiveCampus(currentCampus);
+
+    if (liveProf) {
+      setProfile(liveProf);
+    } else {
+      // Default fallback profile structure
+      setProfile({
+        id: "guest",
+        email: "student@grabit.in",
+        fullName: "Grabit Customer",
+        phone: "+91 98765 43210",
+        role: "student",
+        campusId: currentCampus?.id || "",
+        campusName: currentCampus?.name || "Campus",
+        grabitUserId: "GRB-FE1B32",
+        avatarUrl:
+          "https://lh3.googleusercontent.com/aida-public/AB6AXuDp0UC7dpD4OUKonC4W287WPg0Gnic80gYNaQUlT5JeKVdN9Qi2mZGcvFp3hdZ05VTrWmjRr-Twvu8fFinGwpcdg0gPV1peTnf5OPY7ytoGnVZ1f_q1Op19HPKnEO3X1GvKha2kWOQqpSRkpPyRjGByLCeqU7qcar10tg5xTuhvKY_nuw8tk-fA7oJzUcBXhBRktsp1XTnf94v1SNBiI-7XR0F0i1Y6PtSMwdTnJwHi4QisCMfCh7_R",
+      });
     }
-
-    loadData();
-    return () => {
-      isMounted = false;
-    };
+    setSubscription(liveSub);
+    setIsLoading(false);
   }, []);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
 
   const showToast = (message: string) => {
     setActiveToast(message);
     setTimeout(() => {
       setActiveToast(null);
     }, 3000);
+  };
+
+  const handleSelectCampus = (campus: SupabaseCampus) => {
+    setActiveCampusId(campus.id);
+    addRecentlyUsedCampusId(campus.id);
+    setActiveCampus(campus);
+    setProfile((prev) =>
+      prev
+        ? {
+            ...prev,
+            campusId: campus.id,
+            campusName: campus.name,
+          }
+        : prev,
+    );
+    showToast(`Active campus switched to ${campus.name}`);
   };
 
   const handleSaveProfile = async (payload: {
@@ -231,6 +261,33 @@ export default function StudentProfilePage() {
               onManage={() => showToast("Subscription management panel active.")}
             />
 
+            {/* Campus & Location Card */}
+            <div className="mb-4 rounded-3xl border border-white/[0.08] bg-white/[0.03] p-4 backdrop-blur-xl flex items-center justify-between gap-3 shadow-sm">
+              <div className="flex items-center gap-3 min-w-0 flex-1">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-primary/15 text-primary border border-primary/30">
+                  <span className="material-symbols-outlined text-[22px]">school</span>
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-[10px] font-extrabold uppercase tracking-wider text-muted">
+                    Active Campus
+                  </p>
+                  <p className="font-display text-body-sm font-bold text-foreground truncate">
+                    {activeCampus?.name || profile.campusName || "Choose Campus"}
+                  </p>
+                  <p className="text-[11px] text-muted truncate">
+                    {activeCampus?.city || "Tap to choose your college"}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsCampusModalOpen(true)}
+                className="rounded-xl border border-primary/40 bg-primary/10 px-3 py-1.5 font-display text-caption font-bold text-primary hover:bg-primary hover:text-on-primary active:scale-95 transition-all shrink-0"
+              >
+                Change Campus
+              </button>
+            </div>
+
             {/* Menu Options */}
             <nav aria-label="Profile navigation" className="space-y-3">
               <ProfileMenuItem
@@ -269,6 +326,17 @@ export default function StudentProfilePage() {
           </span>
         </div>
       </main>
+
+      {/* Campus Selector Modal */}
+      <CampusSelectorModal
+        isOpen={isCampusModalOpen}
+        onClose={() => setIsCampusModalOpen(false)}
+        campuses={campuses}
+        selectedCampusId={activeCampus?.id || null}
+        onSelectCampus={handleSelectCampus}
+        onDetectLocation={() => {}}
+        isDetectingLocation={false}
+      />
 
       {/* Edit Profile Modal */}
       {profile && (

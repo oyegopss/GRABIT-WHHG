@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type { VendorOrder } from "@/lib/mock/vendor";
 import { useModalBackHandler } from "@/lib/navigation/backButtonManager";
+import { stopOrderAlert } from "@/lib/vendor/orderAlertSoundManager";
 
 const REJECT_REASONS = ["Item unavailable", "Vendor too busy", "Other"];
 
@@ -38,6 +39,7 @@ export function IncomingOrderAlert({
   const total = onlinePendingOrders.reduce((sum, o) => sum + o.totalAmount, 0);
 
   const handleAccept = async () => {
+    stopOrderAlert();
     setIsProcessing(true);
     try {
       await onAccept(order.id);
@@ -47,6 +49,7 @@ export function IncomingOrderAlert({
   };
 
   const handleConfirmReject = async () => {
+    stopOrderAlert();
     const finalReason =
       reason === "Other" && customReason.trim() ? customReason.trim() : reason;
     setIsProcessing(true);

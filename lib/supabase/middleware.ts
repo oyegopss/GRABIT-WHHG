@@ -69,7 +69,8 @@ export async function updateSession(request: NextRequest) {
   const isAuthPagePath = isStudentAuth || isVendorAuth || isSuperAdminAuth;
 
   const isProtectedStudent = pathname.startsWith("/customer");
-  const isProtectedVendor = pathname.startsWith("/vendor") && !isVendorAuth;
+  const isProtectedVendor =
+    pathname.startsWith("/vendor") && !isVendorAuth && !pathname.startsWith("/vendor/reset-password");
   const isProtectedSuperAdmin = pathname.startsWith("/superadmin") && !isSuperAdminAuth;
 
   const isProtectedPath =

@@ -242,6 +242,7 @@ export async function sendVendorDailyRevenueEmail(params: {
 export async function sendPasswordResetEmail(params: {
   email: string;
   actionLink: string;
+  role?: "vendor" | "student" | "superadmin";
 }): Promise<EmailSendResult> {
   const minuteBucket = Math.floor(Date.now() / 60_000);
   const idempotencyKey = `password-reset-${params.email.trim().toLowerCase()}-${minuteBucket}`;
@@ -258,7 +259,10 @@ export async function sendPasswordResetEmail(params: {
       return { ok: true, skipped: true };
     }
 
-    const { subject, html, text } = renderPasswordResetEmail({ actionLink: params.actionLink });
+    const { subject, html, text } = renderPasswordResetEmail({
+      actionLink: params.actionLink,
+      role: params.role,
+    });
     const resend = getResendClient();
 
     const { data: sendResult, error } = await resend.emails.send(

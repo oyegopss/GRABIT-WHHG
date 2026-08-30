@@ -43,10 +43,13 @@ export async function GET(request: Request) {
       const cfStatus = await getCashfreeOrderStatus(payment.cashfree_order_id);
       const orderStatus = (cfStatus as { order_status?: string })?.order_status;
       if (orderStatus === "PAID") {
-        await admin
-          .from("payments")
-          .update({ status: "success", paid_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-          .eq("order_id", orderId);
+        const { confirmOrderPaymentSuccess } = await import("@/lib/payments/order_payment_confirmation");
+        await confirmOrderPaymentSuccess({
+          orderId,
+          cashfreeOrderId: payment.cashfree_order_id,
+          gatewayResponse: cfStatus,
+          actorReason: "Payment verified successfully via Cashfree status polling",
+        });
         return NextResponse.json({ ok: true, paymentStatus: "success", orderStatus: orderRow.status });
       }
 

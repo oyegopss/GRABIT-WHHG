@@ -33,15 +33,8 @@ export async function POST(request: Request) {
     const supabase = getSupabaseAdminClient();
     const nowIso = new Date().toISOString();
 
-    // 1. Deactivate older active tokens for this user
-    await supabase
-      .from("vendor_device_tokens")
-      .update({ is_active: false, updated_at: nowIso })
-      .eq("user_id", vendorCtx.userId)
-      .neq("token", token);
-
-    // 2. Upsert token for this vendor and canteen
-    const { error } = await supabase.from("vendor_device_tokens").upsert(
+    // 1. Try upserting into vendor_device_tokens first
+    let { error: vendorTokenError } = await supabase.from("vendor_device_tokens").upsert(
       {
         user_id: vendorCtx.userId,
         canteen_id: vendorCtx.canteenId,
@@ -55,12 +48,28 @@ export async function POST(request: Request) {
       { onConflict: "token" }
     );
 
-    if (error) {
-      console.warn("Could not register vendor push token:", error.message);
-      return NextResponse.json(
-        { ok: false, error: "Failed to store device token." },
-        { status: 500 }
+    // 2. If table doesn't exist in Supabase cache, fallback to student_device_tokens
+    if (vendorTokenError) {
+      const { error: fallbackError } = await supabase.from("student_device_tokens").upsert(
+        {
+          user_id: vendorCtx.userId,
+          token,
+          device_type: deviceType,
+          device_name: deviceName,
+          is_active: true,
+          updated_at: nowIso,
+          last_active_at: nowIso,
+        },
+        { onConflict: "token" }
       );
+
+      if (fallbackError) {
+        console.warn("Could not register device token in either table:", fallbackError.message);
+        return NextResponse.json(
+          { ok: false, error: "Failed to store device token." },
+          { status: 500 }
+        );
+      }
     }
 
     return NextResponse.json({ ok: true, registered: true });
@@ -92,9 +101,17 @@ export async function DELETE(request: Request) {
     }
 
     const supabase = getSupabaseAdminClient();
+    const nowIso = new Date().toISOString();
+
     await supabase
       .from("vendor_device_tokens")
-      .update({ is_active: false, updated_at: new Date().toISOString() })
+      .update({ is_active: false, updated_at: nowIso })
+      .eq("token", body.token)
+      .eq("user_id", vendorCtx.userId);
+
+    await supabase
+      .from("student_device_tokens")
+      .update({ is_active: false, updated_at: nowIso })
       .eq("token", body.token)
       .eq("user_id", vendorCtx.userId);
 

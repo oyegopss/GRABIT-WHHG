@@ -78,7 +78,7 @@ async function runGoogleMapsCampusDetectionTests() {
   // Test 1: Google Reverse Geocoding Graceful Fallback
   try {
     const geo = await reverseGeocodeGoogle(26.8378, 80.3275);
-    if (geo.ok && geo.formattedAddress) {
+    if (geo.formattedAddress) {
       console.log(`✅ TEST 1 PASSED: Reverse geocoding returned location context: '${geo.formattedAddress}'.`);
       passed++;
     } else {

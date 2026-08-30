@@ -1,7 +1,6 @@
 package com.grabit.vendor;
 
 import android.Manifest;
-import android.app.Activity;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
@@ -42,9 +41,10 @@ import com.getcapacitor.annotation.PermissionCallback;
 public class OrderAlertPlugin extends Plugin {
 
     private static final String TAG = "OrderAlertPlugin";
-    public static final String CHANNEL_ID = "grabit_new_orders_channel_v1";
+    public static final String PRIMARY_CHANNEL_ID = "grabit_new_orders";
+    public static final String LEGACY_CHANNEL_ID = "grabit_new_orders_channel_v1";
     public static final String CHANNEL_NAME = "GRABIT New Orders";
-    public static final String CHANNEL_DESCRIPTION = "High-priority sound and vibration alerts for incoming customer orders";
+    public static final String CHANNEL_DESCRIPTION = "High-priority real-time sound and vibration alerts for incoming customer orders";
 
     private static String pendingOrderId = null;
     private static String pendingOrderNumber = null;
@@ -54,72 +54,110 @@ public class OrderAlertPlugin extends Plugin {
     public void load() {
         super.load();
         instance = this;
-        ensureNotificationChannel();
+        ensureNotificationChannels(getContext());
     }
 
     /**
-     * Initializes the dedicated NotificationChannel for GRABIT New Orders with custom sound and vibration.
+     * Initializes both primary and legacy NotificationChannels for GRABIT New Orders with custom sound and vibration.
+     * Safe to call repeatedly and statically from MainActivity.onCreate.
      */
-    public void ensureNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            try {
-                NotificationManager manager = (NotificationManager) getContext().getSystemService(Context.NOTIFICATION_SERVICE);
-                if (manager == null) return;
+    public static void ensureNotificationChannels(Context ctx) {
+        if (ctx == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            return;
+        }
 
-                NotificationChannel existingChannel = manager.getNotificationChannel(CHANNEL_ID);
-                if (existingChannel != null) {
-                    return; // Channel already configured
+        try {
+            NotificationManager manager = (NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE);
+            if (manager == null) return;
+
+            String[] channelIds = new String[]{PRIMARY_CHANNEL_ID, LEGACY_CHANNEL_ID};
+            Uri soundUri = Uri.parse(ContentResolver.SCHEME_ANDROID_RESOURCE + "://" + ctx.getPackageName() + "/" + R.raw.order_alert);
+            AudioAttributes audioAttributes = new AudioAttributes.Builder()
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .setUsage(AudioAttributes.USAGE_NOTIFICATION_EVENT)
+                .build();
+            long[] vibrationPattern = new long[]{0, 600, 200, 600, 200, 600};
+
+            for (String channelId : channelIds) {
+                NotificationChannel existingChannel = manager.getNotificationChannel(channelId);
+                if (existingChannel == null) {
+                    NotificationChannel channel = new NotificationChannel(
+                        channelId,
+                        CHANNEL_NAME,
+                        NotificationManager.IMPORTANCE_HIGH
+                    );
+                    channel.setDescription(CHANNEL_DESCRIPTION);
+                    channel.enableLights(true);
+                    channel.setLightColor(Color.parseColor("#00E676"));
+                    channel.enableVibration(true);
+                    channel.setVibrationPattern(vibrationPattern);
+                    channel.setShowBadge(true);
+                    channel.setLockscreenVisibility(NotificationCompat.VISIBILITY_PUBLIC);
+                    channel.setSound(soundUri, audioAttributes);
+
+                    manager.createNotificationChannel(channel);
+                    Log.i(TAG, "Notification channel created: " + channelId);
                 }
-
-                NotificationChannel channel = new NotificationChannel(
-                    CHANNEL_ID,
-                    CHANNEL_NAME,
-                    NotificationManager.IMPORTANCE_HIGH
-                );
-                channel.setDescription(CHANNEL_DESCRIPTION);
-                channel.enableLights(true);
-                channel.setLightColor(Color.parseColor("#00E676"));
-                channel.enableVibration(true);
-                long[] vibrationPattern = new long[]{0, 600, 200, 600, 200, 600};
-                channel.setVibrationPattern(vibrationPattern);
-                channel.setShowBadge(true);
-                channel.setLockscreenVisibility(NotificationCompat.VISIBILITY_PUBLIC);
-
-                Uri soundUri = Uri.parse(ContentResolver.SCHEME_ANDROID_RESOURCE + "://" + getContext().getPackageName() + "/" + R.raw.order_alert);
-                AudioAttributes audioAttributes = new AudioAttributes.Builder()
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                    .setUsage(AudioAttributes.USAGE_NOTIFICATION_EVENT)
-                    .build();
-                channel.setSound(soundUri, audioAttributes);
-
-                manager.createNotificationChannel(channel);
-                Log.i(TAG, "Notification channel created: " + CHANNEL_ID);
-            } catch (Exception e) {
-                Log.e(TAG, "Failed to create notification channel", e);
             }
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to create notification channels", e);
         }
     }
 
     // ==========================================
-    // Permission Management
+    // Permission & Channel State Management
     // ==========================================
 
     @PluginMethod
     public void checkNotificationPermission(PluginCall call) {
+        Context ctx = getContext();
+        ensureNotificationChannels(ctx);
+
         JSObject ret = new JSObject();
-        boolean areEnabled = NotificationManagerCompat.from(getContext()).areNotificationsEnabled();
-        boolean permissionGranted = true;
+        boolean areEnabled = NotificationManagerCompat.from(ctx).areNotificationsEnabled();
+        boolean postNotificationsGranted = true;
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            permissionGranted = ActivityCompat.checkSelfPermission(
-                getContext(),
+            postNotificationsGranted = ActivityCompat.checkSelfPermission(
+                ctx,
                 Manifest.permission.POST_NOTIFICATIONS
             ) == PackageManager.PERMISSION_GRANTED;
         }
 
-        boolean fullyGranted = areEnabled && permissionGranted;
+        boolean channelExists = false;
+        boolean channelBlocked = false;
+        boolean channelSoundEnabled = true;
+        boolean channelVibrationEnabled = true;
+        int channelImportance = 4; // IMPORTANCE_HIGH
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationManager manager = (NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE);
+            if (manager != null) {
+                NotificationChannel channel = manager.getNotificationChannel(PRIMARY_CHANNEL_ID);
+                if (channel == null) {
+                    channel = manager.getNotificationChannel(LEGACY_CHANNEL_ID);
+                }
+
+                if (channel != null) {
+                    channelExists = true;
+                    channelImportance = channel.getImportance();
+                    channelBlocked = (channelImportance == NotificationManager.IMPORTANCE_NONE);
+                    channelSoundEnabled = (channel.getSound() != null);
+                    channelVibrationEnabled = channel.shouldVibrate();
+                }
+            }
+        }
+
+        boolean fullyGranted = areEnabled && postNotificationsGranted && !channelBlocked;
+
         ret.put("granted", fullyGranted);
         ret.put("areNotificationsEnabled", areEnabled);
+        ret.put("postNotificationsGranted", postNotificationsGranted);
+        ret.put("channelExists", channelExists);
+        ret.put("channelBlocked", channelBlocked);
+        ret.put("channelSoundEnabled", channelSoundEnabled);
+        ret.put("channelVibrationEnabled", channelVibrationEnabled);
+        ret.put("channelImportance", channelImportance);
         ret.put("isPermanentlyDenied", !fullyGranted);
         call.resolve(ret);
     }
@@ -156,7 +194,6 @@ public class OrderAlertPlugin extends Plugin {
             ctx.startActivity(intent);
             call.resolve();
         } catch (Exception e) {
-            // Fallback to application details settings
             try {
                 Intent fallback = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
                 fallback.setData(Uri.fromParts("package", getContext().getPackageName(), null));
@@ -166,6 +203,25 @@ public class OrderAlertPlugin extends Plugin {
             } catch (Exception ex) {
                 call.reject("Unable to open notification settings: " + ex.getMessage());
             }
+        }
+    }
+
+    @PluginMethod
+    public void openChannelNotificationSettings(PluginCall call) {
+        try {
+            Context ctx = getContext();
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                Intent intent = new Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS);
+                intent.putExtra(Settings.EXTRA_APP_PACKAGE, ctx.getPackageName());
+                intent.putExtra(Settings.EXTRA_CHANNEL_ID, PRIMARY_CHANNEL_ID);
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                ctx.startActivity(intent);
+                call.resolve();
+            } else {
+                openNotificationSettings(call);
+            }
+        } catch (Exception e) {
+            openNotificationSettings(call);
         }
     }
 
@@ -205,7 +261,7 @@ public class OrderAlertPlugin extends Plugin {
             String testOrderId = "TEST-" + System.currentTimeMillis() % 10000;
             String testOrderNumber = "#" + (1000 + (int)(Math.random() * 9000));
             String title = "GRABIT Vendor — Test Order Alert";
-            String body = "Test alert: Order " + testOrderNumber + " • 2 items (₹250). Notification sound and vibration are working perfectly.";
+            String body = "Test alert: Order " + testOrderNumber + " • 2 items (₹250). Notification sound and vibration are working.";
 
             int notifId = 9999;
             triggerNativeOrderNotification(testOrderId, testOrderNumber, title, body, notifId);
@@ -222,7 +278,7 @@ public class OrderAlertPlugin extends Plugin {
 
     private void triggerNativeOrderNotification(String orderId, String orderNumber, String title, String body, int notifId) {
         Context ctx = getContext();
-        ensureNotificationChannel();
+        ensureNotificationChannels(ctx);
 
         Intent intent = new Intent(ctx, MainActivity.class);
         intent.setAction(Intent.ACTION_VIEW);
@@ -246,7 +302,7 @@ public class OrderAlertPlugin extends Plugin {
         Uri soundUri = Uri.parse(ContentResolver.SCHEME_ANDROID_RESOURCE + "://" + ctx.getPackageName() + "/" + R.raw.order_alert);
         long[] vibrationPattern = new long[]{0, 600, 200, 600, 200, 600};
 
-        NotificationCompat.Builder builder = new NotificationCompat.Builder(ctx, CHANNEL_ID)
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(ctx, PRIMARY_CHANNEL_ID)
             .setSmallIcon(iconRes)
             .setContentTitle(title)
             .setContentText(body)
@@ -303,9 +359,25 @@ public class OrderAlertPlugin extends Plugin {
         String orderId = intent.getStringExtra("orderId");
         String orderNumber = intent.getStringExtra("orderNumber");
 
-        if ("NEW_ORDER".equals(type) && orderId != null && !orderId.isEmpty()) {
+        if (orderId == null || orderId.isEmpty()) {
+            // Also check data URI or actionUrl if present
+            if (intent.getData() != null) {
+                String path = intent.getData().getPath();
+                if (path != null && path.contains("/orders/")) {
+                    String[] parts = path.split("/orders/");
+                    if (parts.length > 1) {
+                        orderId = parts[1];
+                        type = "NEW_ORDER";
+                    }
+                }
+            }
+        }
+
+        if (("NEW_ORDER".equals(type) || type == null) && orderId != null && !orderId.isEmpty()) {
             pendingOrderId = orderId;
             pendingOrderNumber = orderNumber;
+
+            Log.i(TAG, "[FCM] Captured incoming order intent: orderId=" + orderId);
 
             if (instance != null) {
                 JSObject data = new JSObject();

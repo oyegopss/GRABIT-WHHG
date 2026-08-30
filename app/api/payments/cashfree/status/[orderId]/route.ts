@@ -125,10 +125,14 @@ export async function GET(request: Request, { params }: RouteParams) {
           const internalStatus = mapCashfreeStatusToInternal(cfStatus?.order_status);
 
           if (internalStatus === "SUCCESS") {
-            await admin
-              .from("payments")
-              .update({ status: "success", paid_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-              .eq("id", paymentRow.id);
+            const { confirmOrderPaymentSuccess } = await import("@/lib/payments/order_payment_confirmation");
+            await confirmOrderPaymentSuccess({
+              orderId: paymentRow.order_id,
+              paymentId: paymentRow.id,
+              cashfreeOrderId: cfOrderId,
+              gatewayResponse: cfStatus,
+              actorReason: "Payment verified successfully via Cashfree order status check",
+            });
 
             return NextResponse.json({
               ok: true,

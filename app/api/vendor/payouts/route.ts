@@ -9,6 +9,7 @@ import type {
   VendorBankAccount,
 } from "@/lib/supabase/vendor_payouts";
 import { getSupabaseAdminClient } from "@/lib/supabase/admin";
+import { getBankNameFromIfsc } from "@/lib/utils/bank";
 
 export async function GET(request: Request) {
   try {
@@ -186,7 +187,7 @@ export async function GET(request: Request) {
     // 7. Fetch Canteen Bank Account
     const { data: canteenInfo } = await supabase
       .from("canteens")
-      .select("bank_account_holder, bank_name, bank_account_number, ifsc_code, payout_account_verified")
+      .select("owner_name, payout_bank_account_number, payout_ifsc, payout_kyc_status, name")
       .eq("id", canteenId)
       .single();
 
@@ -199,15 +200,16 @@ export async function GET(request: Request) {
       isConfigured: false,
     };
 
-    if (canteenInfo && canteenInfo.bank_account_number) {
-      const rawAcc = canteenInfo.bank_account_number.trim();
+    if (canteenInfo && canteenInfo.payout_bank_account_number) {
+      const rawAcc = canteenInfo.payout_bank_account_number.trim();
       const masked = rawAcc.length >= 4 ? `•••• •••• ${rawAcc.slice(-4)}` : "••••";
+      const bankName = getBankNameFromIfsc(canteenInfo.payout_ifsc);
       bankAccount = {
-        accountHolderName: canteenInfo.bank_account_holder || "Vendor Business",
-        bankName: canteenInfo.bank_name || "HDFC Bank",
+        accountHolderName: canteenInfo.owner_name || canteenInfo.name || "Vendor Business",
+        bankName: bankName,
         maskedAccountNumber: masked,
-        ifscCode: canteenInfo.ifsc_code || "",
-        isVerified: Boolean(canteenInfo.payout_account_verified),
+        ifscCode: canteenInfo.payout_ifsc || "",
+        isVerified: canteenInfo.payout_kyc_status === "VERIFIED",
         isConfigured: true,
       };
     }

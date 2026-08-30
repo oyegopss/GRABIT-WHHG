@@ -109,6 +109,16 @@ export async function POST(request: Request) {
       );
     }
 
+    const { checkRateLimit, createRateLimitResponse, getClientIp, RATE_LIMIT_TIERS } = await import("@/lib/security/rate_limit");
+    const userRateLimit = checkRateLimit(
+      `create-order-user:${user.id}`,
+      RATE_LIMIT_TIERS.ORDER.limit,
+      RATE_LIMIT_TIERS.ORDER.windowMs,
+    );
+    if (userRateLimit.limited) {
+      return createRateLimitResponse(userRateLimit, "Too many order attempts. Please wait a moment.");
+    }
+
     // Initialize Admin Supabase Client for bypassing RLS during order placement
     const supabase = getSupabaseAdminClient();
 

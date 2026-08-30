@@ -22,12 +22,19 @@ export async function GET() {
     // Client query parameters trying to spoof canteen scope (?canteen_id=..., ?vendor_id=...) are explicitly ignored!
     const data = await getVendorOperationalNotifications();
 
-    return NextResponse.json(data, {
-      status: 200,
-      headers: {
-        "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+    return NextResponse.json(
+      {
+        ok: true,
+        notifications: data.notifications,
+        openCount: data.openCount,
       },
-    });
+      {
+        status: 200,
+        headers: {
+          "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+        },
+      }
+    );
   } catch (err) {
     console.error("Failed to fetch vendor operational notifications:", err);
     return NextResponse.json(

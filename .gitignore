@@ -78,5 +78,6 @@ vendor-mobile/www/
 # binaries / APKs
 *.apk
 public/*.apk
+/release/
 /GrabiT/
 

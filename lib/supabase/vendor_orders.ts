@@ -25,6 +25,17 @@ export interface SupabaseVendorOrderRow {
   student_identifier?: string | null;
   canteens?: { name: string };
   users?: { full_name?: string | null } | null;
+  payments?: {
+    id: string;
+    status: "pending" | "success" | "failed" | "refunded";
+    method: string;
+    amount: number;
+  }[] | {
+    id: string;
+    status: "pending" | "success" | "failed" | "refunded";
+    method: string;
+    amount: number;
+  } | null;
   order_items?: {
     id: string;
     menu_item_id: string;
@@ -38,6 +49,7 @@ export interface SupabaseVendorOrderRow {
  * Fetch live vendor active orders from Supabase database, strictly
  * scoped to the given canteen. Merges local offline manual cash orders
  * from IndexedDB if server is offline or sync is pending.
+ * Filters out unconfirmed/unpaid in-flight payment orders.
  */
 export async function getLiveVendorOrders(
   canteenId?: string,
@@ -56,6 +68,7 @@ export async function getLiveVendorOrders(
         *,
         canteens ( name ),
         users:student_id ( full_name ),
+        payments ( id, status, method, amount ),
         order_items (
           id,
           menu_item_id,
@@ -68,7 +81,9 @@ export async function getLiveVendorOrders(
       .order("created_at", { ascending: false });
 
     if (!error && orders) {
-      dbOrders = orders.map((o) => mapSupabaseVendorOrderToUI(o as SupabaseVendorOrderRow));
+      const mapped = orders.map((o) => mapSupabaseVendorOrderToUI(o as SupabaseVendorOrderRow));
+      // Strict rule: An order in "placed" status MUST have verified payment success before being shown to the vendor
+      dbOrders = mapped.filter((o) => o.isPaid === true || o.status !== "placed");
     }
   } catch {
     // Database connection fallback
@@ -91,6 +106,8 @@ export async function getLiveVendorOrders(
         createdAtIso: loc.createdAt,
         orderType: "MANUAL_CASH_ORDER",
         isManual: true,
+        isPaid: true,
+        paymentStatus: "success",
       };
     });
 
@@ -129,6 +146,7 @@ export function mapSupabaseVendorOrderToUI(row: SupabaseVendorOrderRow): VendorO
   const isManualOrder = Boolean(
     row.is_manual ||
     row.order_type === "MANUAL_CASH_ORDER" ||
+    row.payment_method === "cash" ||
     (row.order_number && row.order_number.includes("-M-"))
   );
 
@@ -138,6 +156,37 @@ export function mapSupabaseVendorOrderToUI(row: SupabaseVendorOrderRow): VendorO
     : isManualOrder
       ? "Walk-in Customer"
       : "Customer";
+
+  const rawPayments = row.payments;
+  const paymentsList = Array.isArray(rawPayments)
+    ? rawPayments
+    : rawPayments
+      ? [rawPayments]
+      : [];
+
+  const hasSuccessPayment = paymentsList.some((p) => p.status === "success");
+  const hasPendingPayment = paymentsList.some((p) => p.status === "pending");
+  const hasFailedPayment = paymentsList.some((p) => p.status === "failed");
+
+  const isZeroAmount = Number(row.total_amount) <= 0;
+
+  // Authoritative payment verification check:
+  const isPaid = Boolean(
+    isManualOrder ||
+    isZeroAmount ||
+    hasSuccessPayment ||
+    (paymentsList.length === 0 && row.status !== "placed" && row.status !== "cancelled")
+  );
+
+  const paymentStatus = hasSuccessPayment
+    ? "success"
+    : hasPendingPayment
+      ? "pending"
+      : hasFailedPayment
+        ? "failed"
+        : isManualOrder || isZeroAmount
+          ? "success"
+          : "pending";
 
   return {
     id: row.id,
@@ -158,5 +207,7 @@ export function mapSupabaseVendorOrderToUI(row: SupabaseVendorOrderRow): VendorO
     cancellationReason: row.cancellation_reason ?? undefined,
     orderType: row.order_type || (isManualOrder ? "MANUAL_CASH_ORDER" : "ONLINE_ORDER"),
     isManual: isManualOrder,
+    isPaid,
+    paymentStatus,
   };
 }

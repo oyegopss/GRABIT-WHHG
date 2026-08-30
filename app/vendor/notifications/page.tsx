@@ -30,7 +30,6 @@ export default function VendorNotificationsPage() {
   const sound = useOrderAlertSound();
 
   const [notifications, setNotifications] = useState<OperationalNotificationItem[]>([]);
-  const [unreadCount, setUnreadCount] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [isError, setIsError] = useState(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
@@ -54,14 +53,18 @@ export default function VendorNotificationsPage() {
 
   const loadNotifications = useCallback(async () => {
     setIsError(false);
-    const res = await fetchVendorNotificationsApi();
-    if (res.ok) {
-      setNotifications(res.notifications);
-      setUnreadCount(res.unreadCount);
-    } else {
+    try {
+      const res = await fetchVendorNotificationsApi();
+      if (res.ok) {
+        setNotifications(res.notifications || []);
+      } else {
+        setIsError(true);
+      }
+    } catch {
       setIsError(true);
+    } finally {
+      setIsLoading(false);
     }
-    setIsLoading(false);
   }, []);
 
   useEffect(() => {
@@ -98,19 +101,39 @@ export default function VendorNotificationsPage() {
     };
   }, [canteenId, loadNotifications]);
 
+  // Derived counts
+  const counts = useMemo(() => {
+    let unread = 0;
+    let read = 0;
+    for (const item of notifications) {
+      if (item.status === "OPEN") {
+        unread++;
+      } else {
+        read++;
+      }
+    }
+    return { unread, read, total: notifications.length };
+  }, [notifications]);
+
   const handleToggleRead = async (id: string, currentStatus: string) => {
-    if (currentStatus === "OPEN") {
+    const isCurrentlyUnread = currentStatus === "OPEN";
+    const nextStatus = isCurrentlyUnread ? "ACKNOWLEDGED" : "OPEN";
+
+    // Optimistic UI update
+    setNotifications((prev) =>
+      prev.map((n) => (n.id === id ? { ...n, status: nextStatus } : n)),
+    );
+
+    const ok = isCurrentlyUnread
+      ? await markNotificationReadApi(id)
+      : await markNotificationUnreadApi(id);
+
+    if (!ok) {
+      // Revert if server update failed
       setNotifications((prev) =>
-        prev.map((n) => (n.id === id ? { ...n, status: "ACKNOWLEDGED" } : n)),
+        prev.map((n) => (n.id === id ? { ...n, status: currentStatus as "OPEN" | "ACKNOWLEDGED" | "RESOLVED" } : n)),
       );
-      setUnreadCount((c) => Math.max(0, c - 1));
-      await markNotificationReadApi(id);
-    } else {
-      setNotifications((prev) =>
-        prev.map((n) => (n.id === id ? { ...n, status: "OPEN" } : n)),
-      );
-      setUnreadCount((c) => c + 1);
-      await markNotificationUnreadApi(id);
+      showToast("Could not update notification state. Please try again.");
     }
   };
 
@@ -118,7 +141,6 @@ export default function VendorNotificationsPage() {
     setNotifications((prev) =>
       prev.map((n) => ({ ...n, status: "ACKNOWLEDGED" })),
     );
-    setUnreadCount(0);
     const ok = await markAllNotificationsReadApi();
     if (ok) {
       showToast("All operational notifications marked as read.");
@@ -202,8 +224,8 @@ export default function VendorNotificationsPage() {
 
         {/* Header */}
         <VendorNotificationCenterHeader
-          unreadCount={unreadCount}
-          totalCount={notifications.length}
+          unreadCount={counts.unread}
+          totalCount={counts.total}
           onMarkAllAsRead={handleMarkAllAsRead}
           onOpenPreferences={() => setIsPrefsModalOpen(true)}
         />
@@ -218,7 +240,9 @@ export default function VendorNotificationsPage() {
           onStatusChange={setSelectedStatus}
           onResetFilters={handleResetFilters}
           filteredCount={filteredNotifications.length}
-          totalCount={notifications.length}
+          totalCount={counts.total}
+          unreadCount={counts.unread}
+          readCount={counts.read}
         />
 
         {/* List Content */}
@@ -240,8 +264,11 @@ export default function VendorNotificationsPage() {
             </p>
             <button
               type="button"
-              onClick={() => loadNotifications()}
-              className="mt-2 rounded-xl bg-primary px-5 py-2.5 font-display text-caption font-bold text-on-primary"
+              onClick={() => {
+                setIsLoading(true);
+                loadNotifications();
+              }}
+              className="mt-2 rounded-xl bg-primary px-5 py-2.5 font-display text-caption font-bold text-on-primary shadow-sm hover:opacity-90 active:scale-95 transition-all"
             >
               Retry
             </button>
@@ -249,23 +276,37 @@ export default function VendorNotificationsPage() {
         ) : filteredNotifications.length === 0 ? (
           <div className="rounded-2xl border border-border bg-surface-elevated/70 p-12 text-center backdrop-blur-md flex flex-col items-center gap-3">
             <span className="material-symbols-outlined text-[48px] text-muted">
-              {notifications.length === 0 ? "notifications_off" : "filter_list_off"}
+              {notifications.length === 0
+                ? "notifications_off"
+                : selectedStatus === "UNREAD"
+                  ? "mark_email_read"
+                  : selectedStatus === "READ"
+                    ? "drafts"
+                    : "filter_list_off"}
             </span>
             <h3 className="font-display text-title font-bold text-foreground">
               {notifications.length === 0
-                ? "You're all caught up!"
-                : "No notifications match your filters"}
+                ? "No operational alerts"
+                : selectedStatus === "UNREAD"
+                  ? "No unread notifications"
+                  : selectedStatus === "READ"
+                    ? "No read notifications"
+                    : "No notifications match your filters"}
             </h3>
             <p className="text-caption text-muted max-w-sm">
               {notifications.length === 0
                 ? "When new orders arrive, inventory levels drop, or settlements occur, real-time alerts will appear here."
-                : "Try selecting another category or clearing your search term."}
+                : selectedStatus === "UNREAD"
+                  ? "You have caught up on all pending operational alerts."
+                  : selectedStatus === "READ"
+                    ? "Notifications you mark as read or acknowledge will appear here."
+                    : "Try selecting another category or clearing your search term."}
             </p>
             {notifications.length > 0 && (
               <button
                 type="button"
                 onClick={handleResetFilters}
-                className="mt-2 rounded-xl bg-primary px-5 py-2.5 font-display text-caption font-bold text-on-primary shadow-glow-primary"
+                className="mt-2 rounded-xl bg-primary px-5 py-2.5 font-display text-caption font-bold text-on-primary shadow-glow-primary hover:opacity-90 active:scale-95 transition-all"
               >
                 Reset Filters
               </button>

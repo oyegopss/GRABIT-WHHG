@@ -65,7 +65,7 @@ export default function VendorRewardsPage() {
   };
 
   return (
-    <main className="min-h-dvh bg-background p-4 pb-24 text-foreground md:p-8">
+    <main className="min-h-dvh bg-background p-4 pt-[calc(var(--safe-area-inset-top,0px)+1.5rem)] md:pt-8 pb-24 text-foreground md:p-8">
       <div className="mx-auto max-w-md space-y-6">
         <div>
           <h1 className="font-display text-heading-lg font-900 text-foreground">Verify Reward Code</h1>

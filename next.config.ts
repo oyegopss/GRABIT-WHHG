@@ -2,6 +2,8 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   compress: true,
+  poweredByHeader: false,
+  productionBrowserSourceMaps: false,
   devIndicators: false,
   allowedDevOrigins: ["192.168.29.205", "localhost:3000", "192.168.29.205:3000"],
   images: {

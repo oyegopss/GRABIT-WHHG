@@ -80,6 +80,54 @@ async function runVendorBankAccountTestSuite() {
     "Confirm Account Number matching logic prevents typos before database submission",
   );
 
+  // TEST 5: Database Column Persistence & Fetch Verification
+  const { getSupabaseAdminClient } = await import("../lib/supabase/admin");
+  const { getBankNameFromIfsc } = await import("../lib/utils/bank");
+  const supabase = getSupabaseAdminClient();
+
+  const testCanteenId = "b1000000-0000-0000-0000-000000000001";
+  const testHolderName = "Gopal Ji Dwivedi";
+  const testAccNum = "123456789012";
+  const testIfsc = "KKBK0005363";
+
+  const { error: dbUpdateErr } = await supabase
+    .from("canteens")
+    .update({
+      owner_name: testHolderName,
+      payout_bank_account_number: testAccNum,
+      payout_ifsc: testIfsc,
+      payout_kyc_status: "VERIFIED",
+    })
+    .eq("id", testCanteenId);
+
+  assert(
+    !dbUpdateErr,
+    "Database update on canonical canteens bank columns (owner_name, payout_bank_account_number, payout_ifsc) succeeds without schema cache error",
+    dbUpdateErr?.message,
+  );
+
+  const { data: fetchCanteen, error: dbFetchErr } = await supabase
+    .from("canteens")
+    .select("owner_name, payout_bank_account_number, payout_ifsc, payout_kyc_status, name")
+    .eq("id", testCanteenId)
+    .single();
+
+  assert(
+    !dbFetchErr &&
+      fetchCanteen?.owner_name === testHolderName &&
+      fetchCanteen?.payout_bank_account_number === testAccNum &&
+      fetchCanteen?.payout_ifsc === testIfsc &&
+      fetchCanteen?.payout_kyc_status === "VERIFIED",
+    "Database read correctly fetches saved bank details and pre-fills account holder, account number, IFSC, and verified status",
+  );
+
+  // TEST 6: Bank Name resolution from IFSC prefix
+  const resolvedBankName = getBankNameFromIfsc(testIfsc);
+  assert(
+    resolvedBankName === "Kotak Mahindra Bank",
+    `IFSC prefix 'KKBK' resolves to 'Kotak Mahindra Bank' (Resolved: ${resolvedBankName})`,
+  );
+
   console.log("\n==================================================");
   console.log(`Test Execution Summary: ${passedTests} PASSED, ${totalTests - passedTests} FAILED`);
   console.log("==================================================\n");

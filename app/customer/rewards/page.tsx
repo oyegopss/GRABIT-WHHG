@@ -210,10 +210,15 @@ export default function StudentRewardsPage() {
             </section>
           </div>
 
-          {/* Right Column on desktop, stacks naturally below on mobile */}
-          <div>
+          {/* Right Column on desktop */}
+          <div className="hidden lg:block">
             <CampusLeadersCard topRank={summary?.rank ?? null} />
           </div>
+        </div>
+
+        {/* Mobile Campus Leaders Entry */}
+        <div className="lg:hidden">
+          <CampusLeadersCard topRank={summary?.rank ?? null} />
         </div>
 
         {/* 3. Available Rewards */}

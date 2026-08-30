@@ -25,6 +25,8 @@ export interface VendorOrder {
   cancellationReason?: string;
   orderType?: string;
   isManual?: boolean;
+  paymentStatus?: "pending" | "success" | "failed" | "refunded";
+  isPaid?: boolean;
 }
 
 export interface VendorStoreConfig {

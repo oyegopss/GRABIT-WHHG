@@ -3,6 +3,7 @@ import { getAuthenticatedVendorContext } from "@/lib/supabase/vendor_auth";
 import type { VendorStoreSettingsData } from "@/lib/supabase/vendor_settings";
 import { resolveImageUrl } from "@/lib/utils/image";
 import { getSupabaseAdminClient } from "@/lib/supabase/admin";
+import { getBankNameFromIfsc } from "@/lib/utils/bank";
 
 export async function GET() {
   try {
@@ -32,8 +33,9 @@ export async function GET() {
       .single();
 
     // 3. Format Bank Payout Details
-    const rawAcc = (canteen.bank_account_number || "").trim();
+    const rawAcc = (canteen.payout_bank_account_number || "").trim();
     const maskedAcc = rawAcc.length >= 4 ? `•••• •••• ${rawAcc.slice(-4)}` : "••••";
+    const bankName = getBankNameFromIfsc(canteen.payout_ifsc);
 
     const campusObj = canteen.campuses as { name?: string } | null;
 
@@ -70,11 +72,11 @@ export async function GET() {
         role: "Vendor",
       },
       payoutAccount: {
-        isConfigured: Boolean(canteen.bank_account_number),
-        bankName: canteen.bank_name || "HDFC Bank",
+        isConfigured: Boolean(canteen.payout_bank_account_number),
+        bankName: bankName,
         maskedAccountNumber: maskedAcc,
-        ifscCode: canteen.ifsc_code || "",
-        isVerified: Boolean(canteen.payout_account_verified),
+        ifscCode: canteen.payout_ifsc || "",
+        isVerified: canteen.payout_kyc_status === "VERIFIED",
       },
     };
 

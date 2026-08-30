@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import type {
   RecommendationItem,
   StudentRecommendationsPayload,
@@ -8,24 +8,53 @@ import type {
 import { trackProductEvent } from "@/lib/analytics/events";
 import { useCart } from "@/lib/cart/CartContext";
 
-export function StudentRecommendationsSection() {
+export function StudentRecommendationsSection({
+  campusId,
+  campusName,
+}: {
+  campusId?: string;
+  campusName?: string;
+}) {
   const [data, setData] = useState<StudentRecommendationsPayload | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
+  const cacheRef = useRef<Record<string, StudentRecommendationsPayload>>({});
+  const requestIdRef = useRef(0);
   const cart = useCart();
 
   useEffect(() => {
-    let isSubscribed = true;
+    const activeId = campusId || "default";
+    const currentRequestId = ++requestIdRef.current;
+
+    // Check client memory cache for immediate rendering without flash
+    if (cacheRef.current[activeId]) {
+      setData(cacheRef.current[activeId]);
+      setLoading(false);
+    } else {
+      setLoading(true);
+      setData(null);
+    }
+
+    const abortController = new AbortController();
 
     async function loadRecommendations() {
       try {
-        const res = await fetch("/api/student/recommendations");
+        const url = campusId
+          ? `/api/student/recommendations?campusId=${encodeURIComponent(campusId)}`
+          : "/api/student/recommendations";
+        const res = await fetch(url, {
+          signal: abortController.signal,
+          headers: { "Cache-Control": "no-cache" },
+        });
+
         if (res.ok) {
           const json: StudentRecommendationsPayload = await res.json();
-          if (isSubscribed) {
+          if (currentRequestId === requestIdRef.current) {
+            cacheRef.current[activeId] = json;
             setData(json);
             trackProductEvent({
               eventName: "recommendation_viewed",
               metadata: {
+                campusId: campusId || json.campusId,
                 count: json.recommendations.length,
                 isPersonalized: json.isPersonalized,
                 timeBucket: json.timeBucket,
@@ -33,19 +62,23 @@ export function StudentRecommendationsSection() {
             });
           }
         }
-      } catch (err) {
-        console.error("Failed to load recommendations:", err);
+      } catch (err: unknown) {
+        if ((err as Error)?.name !== "AbortError") {
+          console.error("Failed to load recommendations:", err);
+        }
       } finally {
-        if (isSubscribed) setLoading(false);
+        if (currentRequestId === requestIdRef.current) {
+          setLoading(false);
+        }
       }
     }
 
     loadRecommendations();
 
     return () => {
-      isSubscribed = false;
+      abortController.abort();
     };
-  }, []);
+  }, [campusId]);
 
   const quantityOf = (itemId: string) => {
     return cart.items.find((i) => i.menuItemId === itemId)?.quantity ?? 0;
@@ -61,12 +94,12 @@ export function StudentRecommendationsSection() {
       image: item.imageUrl,
     });
 
-    // Track recommendation click & cart addition (non-blocking)
     trackProductEvent({
       eventName: "recommendation_clicked",
       canteenId: item.canteenId,
       menuItemId: item.itemId,
       metadata: {
+        campusId: item.campusId,
         category: item.category,
         position: index + 1,
         reason: item.reason,
@@ -78,6 +111,7 @@ export function StudentRecommendationsSection() {
       canteenId: item.canteenId,
       menuItemId: item.itemId,
       metadata: {
+        campusId: item.campusId,
         price: item.price,
         category: item.category,
       },
@@ -113,8 +147,33 @@ export function StudentRecommendationsSection() {
     );
   }
 
+  const effectiveCampusName = campusName || data?.campusName || "Campus";
+
   if (!data || data.recommendations.length === 0) {
-    return null;
+    return (
+      <section className="mb-6 space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 className="flex items-center gap-2 text-body font-bold text-foreground">
+            <span className="material-symbols-outlined text-primary text-lg">auto_awesome</span>
+            Popular Around {effectiveCampusName}
+          </h2>
+          <span className="text-[11px] font-mono text-muted uppercase tracking-wider">
+            CAMPUS PICKS
+          </span>
+        </div>
+        <div className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-5 text-center space-y-2 backdrop-blur-xl">
+          <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10 text-primary border border-primary/20">
+            <span className="material-symbols-outlined text-[20px]">local_fire_department</span>
+          </div>
+          <p className="font-display text-body-sm font-bold text-foreground">
+            Nothing trending yet at {effectiveCampusName}
+          </p>
+          <p className="text-caption text-muted max-w-xs mx-auto text-[12px]">
+            Popular picks will appear here as students place orders at this campus&apos;s food stalls.
+          </p>
+        </div>
+      </section>
+    );
   }
 
   return (

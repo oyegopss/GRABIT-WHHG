@@ -365,12 +365,13 @@ export async function signInWithGoogle(): Promise<{ ok: boolean; error?: string 
  */
 export async function sendPasswordResetEmail(
   email: string,
+  role: "vendor" | "student" | "superadmin" = "student",
 ): Promise<{ ok: boolean; error?: string }> {
   try {
     const res = await fetch("/api/auth/password-reset", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: email.trim() }),
+      body: JSON.stringify({ email: email.trim(), role }),
     });
     const data = await res.json().catch(() => null);
 

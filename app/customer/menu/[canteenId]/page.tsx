@@ -1,6 +1,7 @@
 import { TrackEventOnMount } from "@/components/shared/TrackEventOnMount";
 import { VendorMenuScreen } from "@/components/student/VendorMenuScreen";
-import { getLiveCanteenMenuItems, getLiveCanteenActiveOffers } from "@/lib/supabase/data";
+import { getLiveCanteenMenuItems } from "@/lib/supabase/data";
+import { getLiveCanteenActiveOffers } from "@/lib/supabase/offers.server";
 
 // Server Component — live per-canteen shop detail page. Menu items and
 // canteen metadata are fetched from Supabase (menu_items/canteens),

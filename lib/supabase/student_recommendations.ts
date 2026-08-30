@@ -20,6 +20,8 @@ export interface RecommendationItem {
   score: number; // 0 - 100
   canteenId: string;
   canteenName: string;
+  campusId: string;
+  campusName: string;
   price: number; // Current menu price (menu_items.price) for display
   isAvailable: boolean;
   itemCategory: string;
@@ -30,6 +32,7 @@ export interface StudentRecommendationsPayload {
   recommendations: RecommendationItem[];
   timeBucket: "BREAKFAST" | "LUNCH" | "SNACK" | "DINNER" | "LATE_NIGHT";
   isPersonalized: boolean;
+  campusId: string | null;
   campusName: string;
   updatedAt: string;
 }
@@ -45,36 +48,120 @@ function getTimeBucket():
 }
 
 /**
- * Derives deterministic, explainable Student Personalization & Recommendations for Student Platform.
- * Strictly uses authenticated auth.uid() identity. Ignores client-supplied student/user IDs.
+ * Derives deterministic, campus-scoped Student Recommendations & Popular Items.
+ * Strictly scopes menu items, orders, and popularity to the given activeCampusId.
+ * NEVER returns items from another campus or global fallbacks.
  */
-export async function getStudentRecommendations(): Promise<StudentRecommendationsPayload> {
+export async function getStudentRecommendations(
+  targetCampusId?: string | null,
+): Promise<StudentRecommendationsPayload> {
   const adminSupabase = getSupabaseAdminClient();
-
-  // 1. Authenticate student via server cookies
-  const serverSupabase = await createClient();
-  const {
-    data: { user },
-  } = await serverSupabase.auth.getUser();
-
-  const studentUserId = user?.id ?? null;
   const timeBucket = getTimeBucket();
 
-  // 2. Fetch all current menu items to get current prices and availability
+  // 1. Authenticate student via server cookies (if available)
+  let studentUserId: string | null = null;
+  try {
+    const serverSupabase = await createClient();
+    const {
+      data: { user },
+    } = await serverSupabase.auth.getUser();
+    studentUserId = user?.id ?? null;
+  } catch {
+    studentUserId = null;
+  }
+
+  // 2. Resolve authoritative campus
+  let activeCampusId = targetCampusId?.trim() || null;
+  let campusName = "Campus";
+
+  if (activeCampusId) {
+    const { data: campusRecord } = await adminSupabase
+      .from("campuses")
+      .select("id, name")
+      .eq("id", activeCampusId)
+      .single();
+    if (campusRecord) {
+      campusName = campusRecord.name;
+    }
+  } else {
+    // If no campus passed, check if student profile has an associated campus
+    if (studentUserId) {
+      const { data: profile } = await adminSupabase
+        .from("profiles")
+        .select("campus_id, campuses(id, name)")
+        .eq("id", studentUserId)
+        .single();
+      if (profile?.campus_id) {
+        activeCampusId = profile.campus_id;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        campusName = (profile.campuses as any)?.name || "Campus";
+      }
+    }
+
+    // Default to the first available active campus if still unresolved
+    if (!activeCampusId) {
+      const { data: defaultCampus } = await adminSupabase
+        .from("campuses")
+        .select("id, name")
+        .eq("is_active", true)
+        .limit(1)
+        .single();
+      if (defaultCampus) {
+        activeCampusId = defaultCampus.id;
+        campusName = defaultCampus.name;
+      }
+    }
+  }
+
+  if (!activeCampusId) {
+    return {
+      recommendations: [],
+      timeBucket,
+      isPersonalized: false,
+      campusId: null,
+      campusName: "Campus",
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  // 3. Fetch canteens belonging strictly to this campus
+  const { data: campusCanteens } = await adminSupabase
+    .from("canteens")
+    .select("id, name, campus_id, campuses(id, name)")
+    .eq("campus_id", activeCampusId);
+
+  const canteenList = campusCanteens ?? [];
+  const canteenIds = canteenList.map((c) => c.id);
+
+  if (canteenIds.length === 0) {
+    return {
+      recommendations: [],
+      timeBucket,
+      isPersonalized: false,
+      campusId: activeCampusId,
+      campusName,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  // 4. Fetch available menu items belonging strictly to this campus's canteens
   const { data: dbMenuItems } = await adminSupabase
     .from("menu_items")
     .select(
       "id, canteen_id, name, category, price, availability, image_url, canteens(id, name, campus_id, campuses(id, name))",
-    );
+    )
+    .in("canteen_id", canteenIds)
+    .eq("availability", "available");
 
   const menuItemsList = dbMenuItems ?? [];
 
-  // Filter ONLY available items (Availability Filtering)
+  // Filter ONLY available items belonging strictly to active campus
   const availableItemsMap = new Map<
     string,
     {
       id: string;
       canteenId: string;
+      campusId: string;
       name: string;
       category: string;
       price: number;
@@ -85,32 +172,45 @@ export async function getStudentRecommendations(): Promise<StudentRecommendation
   >();
 
   menuItemsList.forEach((m) => {
-    if (m.availability === "available") {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const canteen = m.canteens as any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const canteen = m.canteens as any;
+    // Mandatory Safety Layer: Validate canteen.campus_id === activeCampusId
+    if (canteen?.campus_id === activeCampusId) {
       availableItemsMap.set(m.id, {
         id: m.id,
         canteenId: m.canteen_id,
+        campusId: activeCampusId,
         name: m.name,
         category: m.category || "General",
         price: Number(m.price) || 0,
         canteenName: canteen?.name || "Campus Canteen",
-        campusName: canteen?.campuses?.name || "Campus",
+        campusName: canteen?.campuses?.name || campusName,
         imageUrl: resolveImageUrl(m.image_url, "dish"),
       });
     }
   });
 
+  if (availableItemsMap.size === 0) {
+    return {
+      recommendations: [],
+      timeBucket,
+      isPersonalized: false,
+      campusId: activeCampusId,
+      campusName,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
   const recommendationList: RecommendationItem[] = [];
   let isPersonalized = false;
-  let campusName = "Campus";
 
-  // 3. ORDER AGAIN ENGINE (If authenticated student has order history)
+  // 5. ORDER AGAIN ENGINE (Scoped strictly to this student and this campus)
   if (studentUserId) {
     const { data: studentOrders } = await adminSupabase
       .from("orders")
-      .select("id, status, created_at")
+      .select("id, status, created_at, canteen_id")
       .eq("student_id", studentUserId)
+      .in("canteen_id", canteenIds)
       .eq("status", "completed")
       .order("created_at", { ascending: false })
       .limit(30);
@@ -140,16 +240,14 @@ export async function getStudentRecommendations(): Promise<StudentRecommendation
         itemFrequencyMap.set(si.menu_item_id, existing);
       });
 
-      // Score and rank student's previous items
+      // Score and rank student's previous items strictly for this campus
       Array.from(itemFrequencyMap.entries())
         .sort((a, b) => b[1].count - a[1].count)
         .forEach(([itemId, stats]) => {
           const item = availableItemsMap.get(itemId);
           if (item) {
-            // Formula: frequencyScore * 0.45 + recencyScore * 0.35 + completionScore * 0.20
             const freqScore = Math.min(100, stats.count * 25);
             const score = Math.round(freqScore * 0.45 + 90 * 0.35 + 100 * 0.2);
-            campusName = item.campusName;
             isPersonalized = true;
 
             recommendationList.push({
@@ -160,7 +258,9 @@ export async function getStudentRecommendations(): Promise<StudentRecommendation
               score,
               canteenId: item.canteenId,
               canteenName: item.canteenName,
-              price: item.price, // Current menu price (menu_items.price)
+              campusId: item.campusId,
+              campusName: item.campusName,
+              price: item.price,
               isAvailable: true,
               itemCategory: item.category,
               imageUrl: item.imageUrl,
@@ -170,38 +270,62 @@ export async function getStudentRecommendations(): Promise<StudentRecommendation
     }
   }
 
-  // 4. CAMPUS POPULARITY & CANTEEN POPULARITY ENGINE
-  const { data: recentOrderItems } = await adminSupabase
-    .from("order_items")
-    .select("menu_item_id, quantity, price_at_order, created_at")
+  // 6. CAMPUS POPULARITY ENGINE (Scoped strictly to orders from this campus's canteens)
+  const { data: campusRecentOrders } = await adminSupabase
+    .from("orders")
+    .select("id, student_id, canteen_id, created_at")
+    .in("canteen_id", canteenIds)
     .order("created_at", { ascending: false })
     .limit(200);
 
-  const globalPopularityMap = new Map<string, number>();
-  (recentOrderItems ?? []).forEach((oi) => {
-    const current = globalPopularityMap.get(oi.menu_item_id) ?? 0;
-    globalPopularityMap.set(
-      oi.menu_item_id,
-      current + (Number(oi.quantity) || 1),
-    );
-  });
+  const campusOrderIds = (campusRecentOrders ?? []).map((o) => o.id);
+  const campusPopularityMap = new Map<string, { totalQty: number; uniqueStudents: Set<string> }>();
 
-  const popularItems = Array.from(globalPopularityMap.entries()).sort(
-    (a, b) => b[1] - a[1],
+  if (campusOrderIds.length > 0) {
+    const { data: campusOrderItems } = await adminSupabase
+      .from("order_items")
+      .select("order_id, menu_item_id, quantity, created_at")
+      .in("order_id", campusOrderIds);
+
+    const orderStudentMap = new Map<string, string>();
+    (campusRecentOrders ?? []).forEach((o) => {
+      if (o.student_id) orderStudentMap.set(o.id, o.student_id);
+    });
+
+    (campusOrderItems ?? []).forEach((oi) => {
+      const stats = campusPopularityMap.get(oi.menu_item_id) ?? {
+        totalQty: 0,
+        uniqueStudents: new Set<string>(),
+      };
+      stats.totalQty += Number(oi.quantity) || 1;
+      const studentId = orderStudentMap.get(oi.order_id);
+      if (studentId) stats.uniqueStudents.add(studentId);
+      campusPopularityMap.set(oi.menu_item_id, stats);
+    });
+  }
+
+  const popularItems = Array.from(campusPopularityMap.entries()).sort(
+    (a, b) => b[1].totalQty - a[1].totalQty,
   );
 
   // Add Popular at Campus items
-  popularItems.forEach(([itemId, qty]) => {
+  popularItems.forEach(([itemId, stats]) => {
     const item = availableItemsMap.get(itemId);
     if (item && !recommendationList.some((r) => r.itemId === item.id)) {
+      const popularityScore = Math.min(
+        98,
+        70 + stats.totalQty * 3 + stats.uniqueStudents.size * 2,
+      );
       recommendationList.push({
         itemId: item.id,
         title: item.name,
         reason: `Popular at ${item.campusName}`,
         category: "POPULAR_AT_CAMPUS",
-        score: Math.min(95, 70 + qty * 2),
+        score: popularityScore,
         canteenId: item.canteenId,
         canteenName: item.canteenName,
+        campusId: item.campusId,
+        campusName: item.campusName,
         price: item.price,
         isAvailable: true,
         itemCategory: item.category,
@@ -210,8 +334,8 @@ export async function getStudentRecommendations(): Promise<StudentRecommendation
     }
   });
 
-  // 5. TRENDING NOW ENGINE (Short-window demand velocity)
-  popularItems.slice(0, 3).forEach(([itemId, qty]) => {
+  // 7. TRENDING NOW ENGINE (Short-window demand velocity for this campus)
+  popularItems.slice(0, 3).forEach(([itemId, stats]) => {
     const item = availableItemsMap.get(itemId);
     if (
       item &&
@@ -224,9 +348,11 @@ export async function getStudentRecommendations(): Promise<StudentRecommendation
         title: item.name,
         reason: `Trending ${timeBucket.replace(/_/g, " ").toLowerCase()} pick`,
         category: "TRENDING_NOW",
-        score: Math.min(98, 80 + qty * 3),
+        score: Math.min(99, 82 + stats.totalQty * 3),
         canteenId: item.canteenId,
         canteenName: item.canteenName,
+        campusId: item.campusId,
+        campusName: item.campusName,
         price: item.price,
         isAvailable: true,
         itemCategory: item.category,
@@ -235,34 +361,60 @@ export async function getStudentRecommendations(): Promise<StudentRecommendation
     }
   });
 
-  // 6. TIME-OF-DAY ENGINE
+  // 8. TIME-OF-DAY ENGINE (Matching items strictly available in this campus)
   availableItemsMap.forEach((item) => {
     let matchesTime = false;
+    const catLower = item.category.toLowerCase();
+    const nameLower = item.name.toLowerCase();
+
     if (
       timeBucket === "BREAKFAST" &&
-      (item.category.toLowerCase().includes("snack") ||
-        item.name.toLowerCase().includes("tea") ||
-        item.name.toLowerCase().includes("dosa"))
+      (catLower.includes("snack") ||
+        catLower.includes("breakfast") ||
+        nameLower.includes("tea") ||
+        nameLower.includes("dosa") ||
+        nameLower.includes("sandwich") ||
+        nameLower.includes("paratha"))
     )
       matchesTime = true;
     if (
       timeBucket === "LUNCH" &&
-      (item.category.toLowerCase().includes("meal") ||
-        item.name.toLowerCase().includes("thali") ||
-        item.name.toLowerCase().includes("combo"))
+      (catLower.includes("meal") ||
+        catLower.includes("lunch") ||
+        nameLower.includes("thali") ||
+        nameLower.includes("rice") ||
+        nameLower.includes("combo") ||
+        nameLower.includes("paneer"))
     )
       matchesTime = true;
     if (
       timeBucket === "SNACK" &&
-      (item.category.toLowerCase().includes("beverage") ||
-        item.name.toLowerCase().includes("burger") ||
-        item.name.toLowerCase().includes("coffee"))
+      (catLower.includes("beverage") ||
+        catLower.includes("snack") ||
+        nameLower.includes("burger") ||
+        nameLower.includes("maggi") ||
+        nameLower.includes("coffee") ||
+        nameLower.includes("tea") ||
+        nameLower.includes("fries"))
     )
       matchesTime = true;
     if (
       timeBucket === "DINNER" &&
-      (item.category.toLowerCase().includes("meal") ||
-        item.name.toLowerCase().includes("paneer"))
+      (catLower.includes("meal") ||
+        catLower.includes("dinner") ||
+        nameLower.includes("thali") ||
+        nameLower.includes("combo") ||
+        nameLower.includes("paneer") ||
+        nameLower.includes("roti"))
+    )
+      matchesTime = true;
+    if (
+      timeBucket === "LATE_NIGHT" &&
+      (catLower.includes("snack") ||
+        nameLower.includes("maggi") ||
+        nameLower.includes("coffee") ||
+        nameLower.includes("sandwich") ||
+        nameLower.includes("burger"))
     )
       matchesTime = true;
 
@@ -275,6 +427,8 @@ export async function getStudentRecommendations(): Promise<StudentRecommendation
         score: 85,
         canteenId: item.canteenId,
         canteenName: item.canteenName,
+        campusId: item.campusId,
+        campusName: item.campusName,
         price: item.price,
         isAvailable: true,
         itemCategory: item.category,
@@ -283,7 +437,7 @@ export async function getStudentRecommendations(): Promise<StudentRecommendation
     }
   });
 
-  // 7. Fallback if no items in DB yet
+  // 9. CAMPUS-SCOPED FALLBACK (Only from active campus items when no order history exists yet)
   if (recommendationList.length === 0) {
     availableItemsMap.forEach((item) => {
       recommendationList.push({
@@ -294,6 +448,8 @@ export async function getStudentRecommendations(): Promise<StudentRecommendation
         score: 80,
         canteenId: item.canteenId,
         canteenName: item.canteenName,
+        campusId: item.campusId,
+        campusName: item.campusName,
         price: item.price,
         isAvailable: true,
         itemCategory: item.category,
@@ -302,9 +458,7 @@ export async function getStudentRecommendations(): Promise<StudentRecommendation
     });
   }
 
-  // 8. RECOMMENDATION DIVERSITY RULES:
-  // - Max 2 items from same category
-  // - Max 3 items from same canteen
+  // 10. RECOMMENDATION DIVERSITY RULES (Max 2 items per category, max 3 items per canteen, max 6 items)
   const categoryCounts = new Map<string, number>();
   const canteenCounts = new Map<string, number>();
   const finalRecommendations: RecommendationItem[] = [];
@@ -328,6 +482,7 @@ export async function getStudentRecommendations(): Promise<StudentRecommendation
     recommendations: finalRecommendations,
     timeBucket,
     isPersonalized,
+    campusId: activeCampusId,
     campusName,
     updatedAt: new Date().toISOString(),
   };

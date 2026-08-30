@@ -27,7 +27,16 @@ interface VendorSettlementItem {
   status: "PENDING" | "PAID" | "PARTIALLY_PAID";
   payment_reference: string | null;
   paid_at: string | null;
-  canteens?: { name: string };
+  payout_status?: "PENDING" | "PROCESSING" | "PAID" | "FAILED" | "REVERSED" | null;
+  cashfree_payout_id?: string | null;
+  payout_failure_reason?: string | null;
+  canteens?: {
+    name: string;
+    owner_name?: string | null;
+    payout_bank_account_number?: string | null;
+    payout_ifsc?: string | null;
+    payout_kyc_status?: string | null;
+  };
 }
 
 export default function SuperAdminSettlementsPage() {
@@ -40,20 +49,25 @@ export default function SuperAdminSettlementsPage() {
   const [selectedCanteen, setSelectedCanteen] = useState<string>("ALL");
   const [selectedStatus, setSelectedStatus] = useState<string>("ALL");
 
-  // Mark as Paid Modal State
+  // Manual Mark as Paid Modal State
   const [activeSettlement, setActiveSettlement] = useState<VendorSettlementItem | null>(null);
   const [payAmount, setPayAmount] = useState<string>("");
   const [payReference, setPayReference] = useState<string>("");
   const [isSubmittingPay, setIsSubmittingPay] = useState(false);
   const [payError, setPayError] = useState<string | null>(null);
 
+  // Cashfree Payout Confirmation Modal State
+  const [cashfreeConfirmTarget, setCashfreeConfirmTarget] = useState<VendorSettlementItem | null>(null);
+  const [isProcessingCashfree, setIsProcessingCashfree] = useState(false);
+  const [cashfreeActionError, setCashfreeActionError] = useState<string | null>(null);
+
   // Manual Trigger State
   const [isGenerating, setIsGenerating] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
 
-  // Cashfree Payouts — separate action, independent of the manual pay flow above.
+  // Cashfree Payouts Configuration & Processing State
   const [payoutsConfigured, setPayoutsConfigured] = useState(false);
-  const [processingCashfreeId, setProcessingCashfreeId] = useState<string | null>(null);
+  const [refreshingId, setRefreshingId] = useState<string | null>(null);
 
   const reloadSettlements = useCallback(() => {
     setIsLoading(true);
@@ -82,36 +96,15 @@ export default function SuperAdminSettlementsPage() {
     fetch("/api/superadmin/cashfree-payouts")
       .then((r) => r.json())
       .then((data) => {
-        if (data.ok) setPayoutsConfigured(data.configured && data.connectionStatus === "CONNECTED");
+        if (data.ok) {
+          setPayoutsConfigured(data.configured && data.connectionStatus === "CONNECTED");
+        }
       })
       .catch(() => {});
   }, []);
 
-  const handlePayViaCashfree = async (settlementId: string) => {
-    setProcessingCashfreeId(settlementId);
-    try {
-      const res = await fetch("/api/superadmin/settlements/pay-cashfree", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ settlementId }),
-      });
-      const data = await res.json();
-      if (!res.ok || !data.ok) {
-        setStatusMsg(data.error || "Cashfree payout failed.");
-      } else {
-        setStatusMsg(`Cashfree payout ${data.payoutStatus === "PAID" ? "completed" : "initiated"} — status: ${data.payoutStatus}.`);
-        reloadSettlements();
-      }
-    } catch {
-      setStatusMsg("Network error initiating Cashfree payout.");
-    } finally {
-      setProcessingCashfreeId(null);
-    }
-  };
-
   useEffect(() => {
     let isMounted = true;
-
     const params = new URLSearchParams();
     if (selectedDate) params.set("date", selectedDate);
     if (selectedCanteen !== "ALL") params.set("canteen_id", selectedCanteen);
@@ -160,6 +153,60 @@ export default function SuperAdminSettlementsPage() {
     } catch {
       setIsGenerating(false);
       setStatusMsg("Network error generating settlements.");
+    }
+  };
+
+  const handleExecuteCashfreePayout = async () => {
+    if (!cashfreeConfirmTarget) return;
+    setIsProcessingCashfree(true);
+    setCashfreeActionError(null);
+
+    try {
+      const isRetry = cashfreeConfirmTarget.payout_status === "FAILED";
+      const endpoint = isRetry
+        ? "/api/superadmin/settlements/pay-cashfree/retry"
+        : "/api/superadmin/settlements/pay-cashfree";
+
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ settlementId: cashfreeConfirmTarget.id }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        setCashfreeActionError(data.error || "Cashfree payout transfer failed.");
+      } else {
+        setCashfreeConfirmTarget(null);
+        setStatusMsg(`Cashfree payout transfer ${data.payoutStatus === "PAID" ? "completed successfully" : "is processing"} (Ref: ${data.cashfreePayoutId || data.referenceId}).`);
+        reloadSettlements();
+      }
+    } catch {
+      setCashfreeActionError("Network error communicating with Cashfree Payouts API.");
+    } finally {
+      setIsProcessingCashfree(false);
+    }
+  };
+
+  const handleRefreshPayoutStatus = async (settlementId: string) => {
+    setRefreshingId(settlementId);
+    try {
+      const res = await fetch("/api/superadmin/settlements/pay-cashfree/status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ settlementId }),
+      });
+      const data = await res.json();
+      if (res.ok && data.ok) {
+        setStatusMsg(`Payout status refreshed: ${data.payoutStatus}.`);
+        reloadSettlements();
+      } else {
+        setStatusMsg(data.error || "Failed to refresh payout status.");
+      }
+    } catch {
+      setStatusMsg("Network error checking transfer status.");
+    } finally {
+      setRefreshingId(null);
     }
   };
 
@@ -233,25 +280,35 @@ export default function SuperAdminSettlementsPage() {
             </h1>
           </div>
           <p className="mt-1 font-body text-caption text-muted">
-            Daily 6:00 PM IST automated vendor payment calculations and Telegram Bot reporting.
+            Automated daily vendor settlements with instant Cashfree Payouts transfer and Telegram alerts.
           </p>
         </div>
 
-        <button
-          type="button"
-          disabled={isGenerating}
-          onClick={handleGenerateSettlements}
-          className="inline-flex items-center gap-2 rounded-2xl bg-primary px-4 py-2.5 font-display text-caption font-bold text-on-primary shadow-glow-primary hover:opacity-90 active:scale-95 disabled:opacity-50 transition-all"
-        >
-          <span
-            className={`material-symbols-outlined text-[18px] ${
-              isGenerating ? "animate-spin" : ""
-            }`}
+        <div className="flex flex-wrap gap-2.5">
+          <a
+            href="/superadmin/cashfree-payouts"
+            className="inline-flex items-center gap-2 rounded-2xl border border-border bg-surface-elevated px-4 py-2.5 font-display text-caption font-bold text-foreground hover:bg-surface-elevated/80 transition-all"
           >
-            {isGenerating ? "progress_activity" : "send"}
-          </span>
-          <span>{isGenerating ? "Processing..." : "Run 6 PM Settlement"}</span>
-        </button>
+            <span className="material-symbols-outlined text-[18px] text-primary">account_balance_wallet</span>
+            <span>Cashfree Payouts Account</span>
+          </a>
+
+          <button
+            type="button"
+            disabled={isGenerating}
+            onClick={handleGenerateSettlements}
+            className="inline-flex items-center gap-2 rounded-2xl bg-primary px-4 py-2.5 font-display text-caption font-bold text-on-primary shadow-glow-primary hover:opacity-90 active:scale-95 disabled:opacity-50 transition-all"
+          >
+            <span
+              className={`material-symbols-outlined text-[18px] ${
+                isGenerating ? "animate-spin" : ""
+              }`}
+            >
+              {isGenerating ? "progress_activity" : "send"}
+            </span>
+            <span>{isGenerating ? "Processing..." : "Run 6 PM Settlement"}</span>
+          </button>
+        </div>
       </div>
 
       {/* Status Notification Banner */}
@@ -397,50 +454,56 @@ export default function SuperAdminSettlementsPage() {
               <thead>
                 <tr className="border-b border-border bg-surface-elevated font-display text-caption font-bold uppercase tracking-wider text-muted">
                   <th className="px-4 py-3">Vendor / Store</th>
-                  <th className="px-4 py-3">Settlement Window</th>
+                  <th className="px-4 py-3">Bank Details</th>
+                  <th className="px-4 py-3">Date</th>
                   <th className="px-4 py-3 text-center">Orders</th>
-                  <th className="px-4 py-3 text-right">Gross Revenue</th>
-                  <th className="px-4 py-3 text-right">Commission (₹1/order)</th>
+                  <th className="px-4 py-3 text-right">Revenue</th>
                   <th className="px-4 py-3 text-right">Payout Due</th>
                   <th className="px-4 py-3 text-center">Telegram</th>
-                  <th className="px-4 py-3 text-center">Status</th>
-                  <th className="px-4 py-3 text-right">Action</th>
+                  <th className="px-4 py-3 text-center">Payout Status</th>
+                  <th className="px-4 py-3 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border/40 font-body text-body-sm">
                 {settlements.map((s) => {
                   const canteenName = s.canteens?.name || "Vendor";
-                  const isPaid = s.status === "PAID";
+                  const isPaid = s.status === "PAID" || s.payout_status === "PAID";
+                  const isProcessing = s.payout_status === "PROCESSING";
+                  const isFailed = s.payout_status === "FAILED";
+                  const rawAcc = (s.canteens?.payout_bank_account_number || "").trim();
+                  const maskedAcc = rawAcc.length >= 4 ? `•••• ${rawAcc.slice(-4)}` : "—";
+                  const ifsc = s.canteens?.payout_ifsc || "—";
 
                   return (
                     <tr key={s.id} className="hover:bg-surface-elevated/50 transition-colors">
                       <td className="px-4 py-3.5 font-display font-bold text-foreground">
-                        {canteenName}
+                        <div>{canteenName}</div>
+                        {s.canteens?.owner_name && (
+                          <div className="text-[11px] font-normal text-muted truncate max-w-[140px]">
+                            {s.canteens.owner_name}
+                          </div>
+                        )}
+                      </td>
+                      <td className="px-4 py-3.5 text-body-xs font-mono">
+                        <div className="font-bold text-foreground">{maskedAcc}</div>
+                        <div className="text-[11px] text-faint">{ifsc}</div>
                       </td>
                       <td className="px-4 py-3.5 text-muted">
                         <div className="font-bold text-foreground">{s.settlement_date}</div>
-                        <div className="text-[11px] text-faint">8:00 AM – 6:00 PM IST</div>
+                        <div className="text-[11px] text-faint">8 AM – 6 PM</div>
                       </td>
                       <td className="px-4 py-3.5 text-center">
                         <span className="font-bold text-foreground">{s.total_orders}</span>
-                        {s.cancelled_orders_count > 0 && (
-                          <span className="ml-1 text-[11px] text-danger">
-                            ({s.cancelled_orders_count} canc.)
-                          </span>
-                        )}
                       </td>
                       <td className="px-4 py-3.5 text-right font-semibold text-foreground">
                         ₹{Number(s.gross_revenue).toLocaleString("en-IN")}
-                      </td>
-                      <td className="px-4 py-3.5 text-right font-semibold text-primary">
-                        ₹{Number(s.commission_amount).toLocaleString("en-IN")}
                       </td>
                       <td className="px-4 py-3.5 text-right font-bold text-warning">
                         ₹{Number(s.payout_due).toLocaleString("en-IN")}
                       </td>
                       <td className="px-4 py-3.5 text-center">
                         {s.telegram_message_id ? (
-                          <span className="inline-flex items-center text-success" title={`Sent msg ID: ${s.telegram_message_id}`}>
+                          <span className="inline-flex items-center text-success" title={`Msg ID: ${s.telegram_message_id}`}>
                             <span className="material-symbols-outlined text-[18px]">check_circle</span>
                           </span>
                         ) : (
@@ -448,41 +511,88 @@ export default function SuperAdminSettlementsPage() {
                         )}
                       </td>
                       <td className="px-4 py-3.5 text-center">
-                        <span
-                          className={`inline-flex rounded-full px-2.5 py-0.5 font-display text-[10px] font-extrabold uppercase tracking-wider ${
-                            isPaid
-                              ? "bg-success/15 text-success border border-success/30"
-                              : "bg-warning/15 text-warning border border-warning/30"
-                          }`}
-                        >
-                          {isPaid ? "PAID" : "PENDING"}
-                        </span>
-                        {s.payment_reference && (
-                          <div className="text-[10px] font-mono text-faint mt-0.5 truncate max-w-[100px]">
-                            {s.payment_reference}
+                        {isPaid ? (
+                          <div>
+                            <span className="inline-flex items-center gap-1 rounded-full border border-success/30 bg-success/15 px-2.5 py-0.5 font-display text-[10px] font-extrabold uppercase text-success">
+                              <span className="material-symbols-outlined text-[12px]">done_all</span>
+                              PAID
+                            </span>
+                            {s.payment_reference && (
+                              <div className="text-[10px] font-mono text-faint mt-0.5 truncate max-w-[110px]" title={s.payment_reference}>
+                                {s.payment_reference}
+                              </div>
+                            )}
                           </div>
+                        ) : isProcessing ? (
+                          <div>
+                            <span className="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/15 px-2.5 py-0.5 font-display text-[10px] font-extrabold uppercase text-primary">
+                              <span className="material-symbols-outlined animate-spin text-[12px]">sync</span>
+                              PROCESSING
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleRefreshPayoutStatus(s.id)}
+                              disabled={refreshingId === s.id}
+                              className="mt-1 block mx-auto text-[10px] text-primary underline hover:text-white"
+                            >
+                              {refreshingId === s.id ? "Checking..." : "Refresh"}
+                            </button>
+                          </div>
+                        ) : isFailed ? (
+                          <div>
+                            <span className="inline-flex items-center gap-1 rounded-full border border-danger/30 bg-danger/15 px-2.5 py-0.5 font-display text-[10px] font-extrabold uppercase text-danger" title={s.payout_failure_reason || "Payout failed"}>
+                              <span className="material-symbols-outlined text-[12px]">error</span>
+                              FAILED
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setCashfreeConfirmTarget(s)}
+                              className="mt-1 block mx-auto text-[10px] font-bold text-danger underline hover:text-white"
+                            >
+                              Retry Payout
+                            </button>
+                          </div>
+                        ) : (
+                          <span className="inline-flex rounded-full border border-warning/30 bg-warning/15 px-2.5 py-0.5 font-display text-[10px] font-extrabold uppercase text-warning">
+                            PENDING
+                          </span>
                         )}
                       </td>
                       <td className="px-4 py-3.5 text-right">
                         {isPaid ? (
                           <span className="font-display text-caption font-semibold text-muted">Settled</span>
+                        ) : isProcessing ? (
+                          <button
+                            type="button"
+                            onClick={() => handleRefreshPayoutStatus(s.id)}
+                            disabled={refreshingId === s.id}
+                            className="rounded-xl border border-primary/40 bg-primary/10 px-3 py-1.5 font-display text-caption font-bold text-primary hover:bg-primary/20 transition-all"
+                          >
+                            {refreshingId === s.id ? "Checking…" : "Check Status"}
+                          </button>
+                        ) : isFailed ? (
+                          <button
+                            type="button"
+                            onClick={() => setCashfreeConfirmTarget(s)}
+                            className="rounded-xl bg-danger px-3 py-1.5 font-display text-caption font-bold text-white hover:opacity-90 transition-all"
+                          >
+                            Retry Cashfree
+                          </button>
                         ) : (
                           <div className="flex flex-col items-end gap-1.5">
                             <button
                               type="button"
-                              onClick={() => handleOpenPayModal(s)}
-                              className="rounded-xl bg-primary px-3 py-1.5 font-display text-caption font-bold text-on-primary hover:opacity-90 active:scale-95 transition-all"
+                              onClick={() => setCashfreeConfirmTarget(s)}
+                              className="rounded-xl bg-primary px-3 py-1.5 font-display text-caption font-bold text-on-primary shadow-glow-primary hover:opacity-90 active:scale-95 transition-all"
                             >
-                              Mark Paid
+                              Pay via Cashfree
                             </button>
                             <button
                               type="button"
-                              disabled={!payoutsConfigured || processingCashfreeId === s.id}
-                              onClick={() => handlePayViaCashfree(s.id)}
-                              title={payoutsConfigured ? "Pay this vendor via Cashfree Payouts" : "Cashfree Payouts is not configured"}
-                              className="rounded-xl border border-border-subtle px-3 py-1.5 font-display text-caption font-bold text-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+                              onClick={() => handleOpenPayModal(s)}
+                              className="rounded-xl border border-border-subtle px-3 py-1 font-display text-[11px] font-semibold text-muted hover:text-foreground"
                             >
-                              {processingCashfreeId === s.id ? "Processing…" : payoutsConfigured ? "Pay via Cashfree" : "Cashfree Not Configured"}
+                              Manual Pay
                             </button>
                           </div>
                         )}
@@ -496,13 +606,98 @@ export default function SuperAdminSettlementsPage() {
         )}
       </div>
 
-      {/* Mark as Paid Modal */}
+      {/* Cashfree Payout Confirmation Modal */}
+      {cashfreeConfirmTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+          <div className="w-full max-w-md rounded-3xl border border-primary/40 bg-surface-elevated p-6 shadow-2xl space-y-5">
+            <div className="flex items-center justify-between border-b border-border pb-3">
+              <div className="flex items-center gap-2">
+                <span className="material-symbols-outlined text-[24px] text-primary">account_balance_wallet</span>
+                <h3 className="font-display text-title font-bold text-foreground">
+                  Confirm Cashfree Payout
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCashfreeConfirmTarget(null)}
+                className="text-faint hover:text-foreground"
+              >
+                <span className="material-symbols-outlined text-[20px]">close</span>
+              </button>
+            </div>
+
+            <div className="rounded-2xl border border-border bg-surface p-4 space-y-2 text-body-sm">
+              <div className="flex justify-between">
+                <span className="text-muted">Vendor Store:</span>
+                <strong className="text-foreground">{cashfreeConfirmTarget.canteens?.name || "Vendor"}</strong>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted">Account Holder:</span>
+                <strong className="text-foreground">{cashfreeConfirmTarget.canteens?.owner_name || cashfreeConfirmTarget.canteens?.name || "—"}</strong>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted">Bank Account:</span>
+                <strong className="font-mono text-foreground">{cashfreeConfirmTarget.canteens?.payout_bank_account_number ? `•••• ${cashfreeConfirmTarget.canteens.payout_bank_account_number.slice(-4)}` : "Not Configured"}</strong>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted">IFSC Code:</span>
+                <strong className="font-mono text-foreground">{cashfreeConfirmTarget.canteens?.payout_ifsc || "—"}</strong>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted">Settlement Date:</span>
+                <strong className="text-foreground">{cashfreeConfirmTarget.settlement_date}</strong>
+              </div>
+              <div className="flex justify-between border-t border-border pt-2">
+                <span className="text-muted font-bold">Payout Amount:</span>
+                <strong className="text-xl font-black text-warning">₹{Number(cashfreeConfirmTarget.payout_due).toLocaleString("en-IN")}</strong>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-warning/30 bg-warning/10 p-3 text-caption font-semibold text-warning">
+              ⚠️ This will execute an electronic money transfer through Cashfree Payouts.
+            </div>
+
+            {cashfreeActionError && (
+              <div className="rounded-xl border border-danger/30 bg-danger/10 p-3 text-caption font-semibold text-danger">
+                {cashfreeActionError}
+              </div>
+            )}
+
+            <div className="flex gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setCashfreeConfirmTarget(null)}
+                className="flex-1 rounded-xl border border-border py-2.5 font-display text-caption font-bold text-muted hover:text-foreground"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isProcessingCashfree}
+                onClick={handleExecuteCashfreePayout}
+                className="flex-1 rounded-xl bg-primary py-2.5 font-display text-caption font-bold text-on-primary shadow-glow-primary hover:opacity-90 disabled:opacity-50 transition-all flex items-center justify-center gap-2"
+              >
+                {isProcessingCashfree ? (
+                  <>
+                    <span className="material-symbols-outlined animate-spin text-[16px]">progress_activity</span>
+                    Transferring...
+                  </>
+                ) : (
+                  "Confirm & Transfer"
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Manual Mark as Paid Modal */}
       {activeSettlement && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
           <div className="w-full max-w-md rounded-3xl border border-border bg-surface-elevated p-6 shadow-2xl space-y-4">
             <div className="flex items-center justify-between border-b border-border pb-3">
               <h3 className="font-display text-title font-bold text-foreground">
-                Process Vendor Payout
+                Record Manual Payment
               </h3>
               <button
                 type="button"
@@ -526,7 +721,7 @@ export default function SuperAdminSettlementsPage() {
             </div>
 
             {payError && (
-              <div className="rounded-xl border border-danger/30 bg-danger-soft p-3 text-caption font-semibold text-danger">
+              <div className="rounded-xl border border-danger/30 bg-danger/10 p-3 text-caption font-semibold text-danger">
                 {payError}
               </div>
             )}
@@ -543,13 +738,13 @@ export default function SuperAdminSettlementsPage() {
                   required
                   value={payAmount}
                   onChange={(e) => setPayAmount(e.target.value)}
-                  className="w-full rounded-xl border border-border bg-surface-elevated px-4 py-2.5 text-body-sm text-foreground focus:border-primary focus:outline-none"
+                  className="w-full rounded-xl border border-border bg-surface px-4 py-2.5 text-body-sm text-foreground focus:border-primary focus:outline-none"
                 />
               </div>
 
               <div>
                 <label htmlFor="pay-ref" className="mb-1 block font-display text-caption font-bold text-muted">
-                  Payment Reference / Transaction UTR
+                  Payment Reference / Bank UTR
                 </label>
                 <input
                   id="pay-ref"
@@ -558,7 +753,7 @@ export default function SuperAdminSettlementsPage() {
                   value={payReference}
                   onChange={(e) => setPayReference(e.target.value)}
                   placeholder="e.g. UTR-98234710293"
-                  className="w-full rounded-xl border border-border bg-surface-elevated px-4 py-2.5 text-body-sm text-foreground focus:border-primary focus:outline-none placeholder:text-faint"
+                  className="w-full rounded-xl border border-border bg-surface px-4 py-2.5 text-body-sm text-foreground focus:border-primary focus:outline-none placeholder:text-faint"
                 />
               </div>
 
@@ -575,7 +770,7 @@ export default function SuperAdminSettlementsPage() {
                   disabled={isSubmittingPay}
                   className="flex-1 rounded-xl bg-primary py-2.5 font-display text-caption font-bold text-on-primary shadow-glow-primary hover:opacity-90 disabled:opacity-50"
                 >
-                  {isSubmittingPay ? "Confirming..." : "Confirm Payment"}
+                  {isSubmittingPay ? "Confirming..." : "Record Payment"}
                 </button>
               </div>
             </form>

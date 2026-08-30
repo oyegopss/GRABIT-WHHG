@@ -56,12 +56,24 @@ const PROMO_ERROR_MESSAGES: Record<string, string> = {
   PER_USER_LIMIT_REACHED: "You've already used this promo code the maximum number of times.",
 };
 
+import { checkRateLimit, createRateLimitResponse, getClientIp, RATE_LIMIT_TIERS } from "@/lib/security/rate_limit";
+
 /**
  * Handles Cashfree order creation for both direct wallet top-up/payments
  * and food checkout orders with full server-side validation.
  */
 export async function POST(request: Request) {
   try {
+    const ip = getClientIp(request);
+    const ipRateLimit = checkRateLimit(
+      `cf-create-order-ip:${ip}`,
+      RATE_LIMIT_TIERS.PAYMENT.limit * 2,
+      RATE_LIMIT_TIERS.PAYMENT.windowMs,
+    );
+    if (ipRateLimit.limited) {
+      return createRateLimitResponse(ipRateLimit, "Too many payment requests from this network. Please wait before trying again.");
+    }
+
     if (!isCashfreeConfigured()) {
       return NextResponse.json({ ok: false, error: "Online payments are not configured yet." }, { status: 503 });
     }
@@ -73,6 +85,17 @@ export async function POST(request: Request) {
       data: { user },
       error: authErr,
     } = await supabaseServer.auth.getUser();
+
+    if (user?.id) {
+      const userRateLimit = checkRateLimit(
+        `cf-create-order-user:${user.id}`,
+        RATE_LIMIT_TIERS.PAYMENT.limit,
+        RATE_LIMIT_TIERS.PAYMENT.windowMs,
+      );
+      if (userRateLimit.limited) {
+        return createRateLimitResponse(userRateLimit, "Too many payment creation attempts. Please wait before trying again.");
+      }
+    }
 
     // 1. Direct wallet top-up / generic payment order flow (when canteenId is not specified)
     if (!payload.canteenId && payload.amount !== undefined) {

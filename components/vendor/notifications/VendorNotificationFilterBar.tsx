@@ -12,6 +12,8 @@ export interface VendorNotificationFilterBarProps {
   onResetFilters: () => void;
   filteredCount: number;
   totalCount: number;
+  unreadCount?: number;
+  readCount?: number;
 }
 
 export function VendorNotificationFilterBar({
@@ -24,6 +26,8 @@ export function VendorNotificationFilterBar({
   onResetFilters,
   filteredCount,
   totalCount,
+  unreadCount = 0,
+  readCount = 0,
 }: VendorNotificationFilterBarProps) {
   const categories: Array<{ label: string; value: NotificationCategory }> = [
     { label: "All Categories", value: "ALL" },
@@ -59,21 +63,30 @@ export function VendorNotificationFilterBar({
         {/* Status Pills */}
         <div className="flex rounded-xl bg-background p-1 border border-border">
           {[
-            { label: "All", value: "ALL" },
-            { label: "Unread Only", value: "UNREAD" },
-            { label: "Read", value: "READ" },
+            { label: "All", value: "ALL", count: totalCount },
+            { label: "Unread Only", value: "UNREAD", count: unreadCount },
+            { label: "Read", value: "READ", count: readCount },
           ].map((st) => (
             <button
               key={st.value}
               type="button"
               onClick={() => onStatusChange(st.value as "ALL" | "UNREAD" | "READ")}
-              className={`rounded-lg px-3 py-1.5 font-display text-caption font-bold transition-all ${
+              className={`rounded-lg px-3 py-1.5 font-display text-caption font-bold transition-all flex items-center gap-1.5 ${
                 selectedStatus === st.value
                   ? "bg-primary text-on-primary shadow-sm"
                   : "text-muted hover:text-foreground"
               }`}
             >
-              {st.label}
+              <span>{st.label}</span>
+              <span
+                className={`rounded-full px-1.5 py-0.2 text-[10px] ${
+                  selectedStatus === st.value
+                    ? "bg-black/20 text-on-primary"
+                    : "bg-surface-elevated text-faint"
+                }`}
+              >
+                {st.count}
+              </span>
             </button>
           ))}
         </div>

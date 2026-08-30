@@ -1,8 +1,11 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import type { OperationalNotificationItem } from "@/lib/notifications/operational_notifications";
 import { useModalBackHandler } from "@/lib/navigation/backButtonManager";
+import { useVendor } from "@/lib/vendor/VendorContext";
+import { createClient } from "@/lib/supabase/client";
 
 interface VendorNotificationsDrawerProps {
   isOpen: boolean;
@@ -16,32 +19,62 @@ export function VendorNotificationsDrawer({
   onSelectOrder,
 }: VendorNotificationsDrawerProps) {
   useModalBackHandler(isOpen, onClose, "vendor-notifications-drawer");
+  const router = useRouter();
+  const { canteenId } = useVendor();
   const [notifications, setNotifications] = useState<OperationalNotificationItem[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
 
+  const fetchNotifications = useCallback(async () => {
+    try {
+      const res = await fetch("/api/vendor/notifications", {
+        headers: { "Cache-Control": "no-cache" },
+      });
+      const data = await res.json();
+      if (data?.ok || Array.isArray(data?.notifications)) {
+        setNotifications(data.notifications || []);
+        setUnreadCount(data.openCount ?? 0);
+      }
+    } catch {
+      // Handled gracefully
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (!isOpen) return;
 
-    let isMounted = true;
+    setIsLoading(true);
+    fetchNotifications();
 
-    fetch("/api/vendor/notifications")
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (isMounted && data?.ok) {
-          setNotifications(data.notifications || []);
-          setUnreadCount(data.openCount || 0);
-        }
-      })
-      .catch(() => {})
-      .finally(() => {
-        if (isMounted) setIsLoading(false);
-      });
+    let channel: ReturnType<ReturnType<typeof createClient>["channel"]> | null = null;
+    if (canteenId) {
+      const supabase = createClient();
+      channel = supabase
+        .channel(`vendor-drawer-notifs-${canteenId}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "*",
+            schema: "public",
+            table: "operational_notifications",
+            filter: `canteen_id=eq.${canteenId}`,
+          },
+          () => {
+            fetchNotifications();
+          }
+        )
+        .subscribe();
+    }
 
     return () => {
-      isMounted = false;
+      if (channel) {
+        const supabase = createClient();
+        supabase.removeChannel(channel);
+      }
     };
-  }, [isOpen]);
+  }, [isOpen, canteenId, fetchNotifications]);
 
   const handleAcknowledge = async (id: string) => {
     try {
@@ -162,14 +195,18 @@ export function VendorNotificationsDrawer({
                     </span>
 
                     <div className="flex items-center gap-2">
-                      {item.relatedOrderId && onSelectOrder && (
+                      {item.relatedOrderId && (
                         <button
                           type="button"
                           onClick={() => {
-                            onSelectOrder(item.relatedOrderId!);
+                            if (onSelectOrder) {
+                              onSelectOrder(item.relatedOrderId!);
+                            } else {
+                              router.push(`/vendor/orders?orderId=${item.relatedOrderId}`);
+                            }
                             onClose();
                           }}
-                          className="font-display text-caption font-bold text-primary hover:underline"
+                          className="font-display text-caption font-bold text-primary hover:underline cursor-pointer"
                         >
                           View Order
                         </button>
